@@ -1,6 +1,6 @@
 /* Poison symbols at compile time.
 
-   Copyright (C) 2017-2022 Free Software Foundation, Inc.
+   Copyright (C) 2017-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -49,7 +49,7 @@ be a compile-time error.  */
 template<typename T>
 struct IsMemsettable
   : gdb::Or<std::is_void<T>,
-	    std::is_pod<T>>
+	    gdb::And<std::is_standard_layout<T>, std::is_trivial<T>>>
 {};
 
 template <typename T,

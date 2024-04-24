@@ -1,6 +1,6 @@
 /* DWARF index writing support for GDB.
 
-   Copyright (C) 1994-2022 Free Software Foundation, Inc.
+   Copyright (C) 1994-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -36,8 +36,8 @@
 #include "gdb/gdb-index.h"
 #include "gdbcmd.h"
 #include "objfiles.h"
-#include "psympriv.h"
 #include "ada-lang.h"
+#include "dwarf2/tag.h"
 
 #include <algorithm>
 #include <cmath>
@@ -137,7 +137,7 @@ public:
   }
 
   /* Return the size of the buffer.  */
-  size_t size () const
+  virtual size_t size () const
   {
     return m_vec.size ();
   }
@@ -176,6 +176,10 @@ struct symtab_index_entry
   /* A sorted vector of the indices of all the CUs that hold an object
      of this name.  */
   std::vector<offset_type> cu_indices;
+
+  /* Minimize CU_INDICES, sorting them and removing duplicates as
+     appropriate.  */
+  void minimize ();
 };
 
 /* The symbol table.  This is a power-of-2-sized hash table.  */
@@ -186,10 +190,17 @@ struct mapped_symtab
     data.resize (1024);
   }
 
+  /* Minimize each entry in the symbol table, removing duplicates.  */
+  void minimize ()
+  {
+    for (symtab_index_entry &item : data)
+      item.minimize ();
+  }
+
   offset_type n_elements = 0;
   std::vector<symtab_index_entry> data;
 
-  /* Temporary storage for Ada names.  */
+  /* Temporary storage for names.  */
   auto_obstack m_string_obstack;
 };
 
@@ -271,21 +282,35 @@ add_index_entry (struct mapped_symtab *symtab, const char *name,
   slot.cu_indices.push_back (cu_index_and_attrs);
 }
 
-/* Sort and remove duplicates of all symbols' cu_indices lists.  */
+/* See symtab_index_entry.  */
 
-static void
-uniquify_cu_indices (struct mapped_symtab *symtab)
+void
+symtab_index_entry::minimize ()
 {
-  for (auto &entry : symtab->data)
+  if (name == nullptr || cu_indices.empty ())
+    return;
+
+  std::sort (cu_indices.begin (), cu_indices.end ());
+  auto from = std::unique (cu_indices.begin (), cu_indices.end ());
+  cu_indices.erase (from, cu_indices.end ());
+
+  /* We don't want to enter a type more than once, so
+     remove any such duplicates from the list as well.  When doing
+     this, we want to keep the entry from the first CU -- but this is
+     implicit due to the sort.  This choice is done because it's
+     similar to what gdb historically did for partial symbols.  */
+  std::unordered_set<offset_type> seen;
+  from = std::remove_if (cu_indices.begin (), cu_indices.end (),
+			 [&] (offset_type val)
     {
-      if (entry.name != NULL && !entry.cu_indices.empty ())
-	{
-	  auto &cu_indices = entry.cu_indices;
-	  std::sort (cu_indices.begin (), cu_indices.end ());
-	  auto from = std::unique (cu_indices.begin (), cu_indices.end ());
-	  cu_indices.erase (from, cu_indices.end ());
-	}
-    }
+      gdb_index_symbol_kind kind = GDB_INDEX_SYMBOL_KIND_VALUE (val);
+      if (kind != GDB_INDEX_SYMBOL_KIND_TYPE)
+	return false;
+
+      val &= ~GDB_INDEX_CU_MASK;
+      return !seen.insert (val).second;
+    });
+  cu_indices.erase (from, cu_indices.end ());
 }
 
 /* A form of 'const char *' suitable for container keys.  Only the
@@ -407,19 +432,21 @@ write_hash_table (mapped_symtab *symtab, data_buf &output, data_buf &cpool)
     }
 }
 
-typedef std::unordered_map<partial_symtab *, unsigned int> psym_index_map;
+using cu_index_map
+  = std::unordered_map<const dwarf2_per_cu_data *, unsigned int>;
 
 /* Helper struct for building the address table.  */
 struct addrmap_index_data
 {
-  addrmap_index_data (data_buf &addr_vec_, psym_index_map &cu_index_htab_)
-    : addr_vec (addr_vec_), cu_index_htab (cu_index_htab_)
+  addrmap_index_data (data_buf &addr_vec_, cu_index_map &cu_index_htab_)
+    : addr_vec (addr_vec_),
+      cu_index_htab (cu_index_htab_)
   {}
 
   data_buf &addr_vec;
-  psym_index_map &cu_index_htab;
+  cu_index_map &cu_index_htab;
 
-  int operator() (CORE_ADDR start_addr, void *obj);
+  int operator() (CORE_ADDR start_addr, const void *obj);
 
   /* True if the previous_* fields are valid.
      We can't write an entry until we see the next entry (since it is only then
@@ -445,9 +472,10 @@ add_address_entry (data_buf &addr_vec,
 /* Worker function for traversing an addrmap to build the address table.  */
 
 int
-addrmap_index_data::operator() (CORE_ADDR start_addr, void *obj)
+addrmap_index_data::operator() (CORE_ADDR start_addr, const void *obj)
 {
-  partial_symtab *pst = (partial_symtab *) obj;
+  const dwarf2_per_cu_data *per_cu
+    = static_cast<const dwarf2_per_cu_data *> (obj);
 
   if (previous_valid)
     add_address_entry (addr_vec,
@@ -455,9 +483,9 @@ addrmap_index_data::operator() (CORE_ADDR start_addr, void *obj)
 		       previous_cu_index);
 
   previous_cu_start = start_addr;
-  if (pst != NULL)
+  if (per_cu != NULL)
     {
-      const auto it = cu_index_htab.find (pst);
+      const auto it = cu_index_htab.find (per_cu);
       gdb_assert (it != cu_index_htab.cend ());
       previous_cu_index = it->second;
       previous_valid = true;
@@ -473,13 +501,12 @@ addrmap_index_data::operator() (CORE_ADDR start_addr, void *obj)
    in the index file.  */
 
 static void
-write_address_map (dwarf2_per_bfd *per_bfd, data_buf &addr_vec,
-		   psym_index_map &cu_index_htab)
+write_address_map (const addrmap *addrmap, data_buf &addr_vec,
+		   cu_index_map &cu_index_htab)
 {
   struct addrmap_index_data addrmap_index_data (addr_vec, cu_index_htab);
 
-  addrmap_foreach (per_bfd->partial_symtabs->psymtabs_addrmap,
-		   addrmap_index_data);
+  addrmap->foreach (addrmap_index_data);
 
   /* It's highly unlikely the last entry (end address = 0xff...ff)
      is valid, but we should still handle it.
@@ -492,147 +519,11 @@ write_address_map (dwarf2_per_bfd *per_bfd, data_buf &addr_vec,
 		       addrmap_index_data.previous_cu_index);
 }
 
-/* Return the symbol kind of PSYM.  */
-
-static gdb_index_symbol_kind
-symbol_kind (struct partial_symbol *psym)
-{
-  domain_enum domain = psym->domain;
-  enum address_class aclass = psym->aclass;
-
-  switch (domain)
-    {
-    case VAR_DOMAIN:
-      switch (aclass)
-	{
-	case LOC_BLOCK:
-	  return GDB_INDEX_SYMBOL_KIND_FUNCTION;
-	case LOC_TYPEDEF:
-	  return GDB_INDEX_SYMBOL_KIND_TYPE;
-	case LOC_COMPUTED:
-	case LOC_CONST_BYTES:
-	case LOC_OPTIMIZED_OUT:
-	case LOC_STATIC:
-	  return GDB_INDEX_SYMBOL_KIND_VARIABLE;
-	case LOC_CONST:
-	  /* Note: It's currently impossible to recognize psyms as enum values
-	     short of reading the type info.  For now punt.  */
-	  return GDB_INDEX_SYMBOL_KIND_VARIABLE;
-	default:
-	  /* There are other LOC_FOO values that one might want to classify
-	     as variables, but dwarf2read.c doesn't currently use them.  */
-	  return GDB_INDEX_SYMBOL_KIND_OTHER;
-	}
-    case STRUCT_DOMAIN:
-      return GDB_INDEX_SYMBOL_KIND_TYPE;
-    default:
-      return GDB_INDEX_SYMBOL_KIND_OTHER;
-    }
-}
-
-/* Add a list of partial symbols to SYMTAB.  */
-
-static void
-write_psymbols (struct mapped_symtab *symtab,
-		std::unordered_set<partial_symbol *> &psyms_seen,
-		const std::vector<partial_symbol *> &symbols,
-		offset_type cu_index,
-		int is_static)
-{
-  for (partial_symbol *psym : symbols)
-    {
-      const char *name = psym->ginfo.search_name ();
-
-      if (psym->ginfo.language () == language_ada)
-	{
-	  /* We want to ensure that the Ada main function's name appears
-	     verbatim in the index.  However, this name will be of the
-	     form "_ada_mumble", and will be rewritten by ada_decode.
-	     So, recognize it specially here and add it to the index by
-	     hand.  */
-	  if (strcmp (main_name (), name) == 0)
-	    {
-	      gdb_index_symbol_kind kind = symbol_kind (psym);
-
-	      add_index_entry (symtab, name, is_static, kind, cu_index);
-	    }
-
-	  /* In order for the index to work when read back into gdb, it
-	     has to supply a funny form of the name: it should be the
-	     encoded name, with any suffixes stripped.  Using the
-	     ordinary encoded name will not work properly with the
-	     searching logic in find_name_components_bounds; nor will
-	     using the decoded name.  Furthermore, an Ada "verbatim"
-	     name (of the form "<MumBle>") must be entered without the
-	     angle brackets.  Note that the current index is unusual,
-	     see PR symtab/24820 for details.  */
-	  std::string decoded = ada_decode (name);
-	  if (decoded[0] == '<')
-	    name = (char *) obstack_copy0 (&symtab->m_string_obstack,
-					   decoded.c_str () + 1,
-					   decoded.length () - 2);
-	  else
-	    name = obstack_strdup (&symtab->m_string_obstack,
-				   ada_encode (decoded.c_str ()));
-	}
-
-      /* Only add a given psymbol once.  */
-      if (psyms_seen.insert (psym).second)
-	{
-	  gdb_index_symbol_kind kind = symbol_kind (psym);
-
-	  add_index_entry (symtab, name, is_static, kind, cu_index);
-	}
-    }
-}
-
-/* Recurse into all "included" dependencies and count their symbols as
-   if they appeared in this psymtab.  */
-
-static void
-recursively_count_psymbols (partial_symtab *psymtab,
-			    size_t &psyms_seen)
-{
-  for (int i = 0; i < psymtab->number_of_dependencies; ++i)
-    if (psymtab->dependencies[i]->user != NULL)
-      recursively_count_psymbols (psymtab->dependencies[i],
-				  psyms_seen);
-
-  psyms_seen += psymtab->global_psymbols.size ();
-  psyms_seen += psymtab->static_psymbols.size ();
-}
-
-/* Recurse into all "included" dependencies and write their symbols as
-   if they appeared in this psymtab.  */
-
-static void
-recursively_write_psymbols (struct objfile *objfile,
-			    partial_symtab *psymtab,
-			    struct mapped_symtab *symtab,
-			    std::unordered_set<partial_symbol *> &psyms_seen,
-			    offset_type cu_index)
-{
-  int i;
-
-  for (i = 0; i < psymtab->number_of_dependencies; ++i)
-    if (psymtab->dependencies[i]->user != NULL)
-      recursively_write_psymbols (objfile,
-				  psymtab->dependencies[i],
-				  symtab, psyms_seen, cu_index);
-
-  write_psymbols (symtab, psyms_seen,
-		  psymtab->global_psymbols, cu_index,
-		  0);
-  write_psymbols (symtab, psyms_seen,
-		  psymtab->static_psymbols, cu_index,
-		  1);
-}
-
 /* DWARF-5 .debug_names builder.  */
 class debug_names
 {
 public:
-  debug_names (dwarf2_per_objfile *per_objfile, bool is_dwarf64,
+  debug_names (dwarf2_per_bfd *per_bfd, bool is_dwarf64,
 	       bfd_endian dwarf5_byte_order)
     : m_dwarf5_byte_order (dwarf5_byte_order),
       m_dwarf32 (dwarf5_byte_order),
@@ -642,7 +533,7 @@ public:
 	       : static_cast<dwarf &> (m_dwarf32)),
       m_name_table_string_offs (m_dwarf.name_table_string_offs),
       m_name_table_entry_offs (m_dwarf.name_table_entry_offs),
-      m_debugstrlookup (per_objfile)
+      m_debugstrlookup (per_bfd)
   {}
 
   int dwarf5_offset_size () const
@@ -655,15 +546,29 @@ public:
   enum class unit_kind { cu, tu };
 
   /* Insert one symbol.  */
-  void insert (const partial_symbol *psym, int cu_index, bool is_static,
-	       unit_kind kind)
+  void insert (const cooked_index_entry *entry)
   {
-    const int dwarf_tag = psymbol_tag (psym);
-    if (dwarf_tag == 0)
-      return;
-    const char *name = psym->ginfo.search_name ();
+    const auto it = m_cu_index_htab.find (entry->per_cu);
+    gdb_assert (it != m_cu_index_htab.cend ());
+    const char *name = entry->full_name (&m_string_obstack);
 
-    if (psym->ginfo.language () == language_ada)
+    /* This is incorrect but it mirrors gdb's historical behavior; and
+       because the current .debug_names generation is also incorrect,
+       it seems better to follow what was done before, rather than
+       introduce a mismatch between the newer and older gdb.  */
+    dwarf_tag tag = entry->tag;
+    if (tag != DW_TAG_typedef && tag_is_type (tag))
+      tag = DW_TAG_structure_type;
+    else if (tag == DW_TAG_enumerator || tag == DW_TAG_constant)
+      tag = DW_TAG_variable;
+
+    int cu_index = it->second;
+    bool is_static = (entry->flags & IS_STATIC) != 0;
+    unit_kind kind = (entry->per_cu->is_debug_types
+		      ? unit_kind::tu
+		      : unit_kind::cu);
+
+    if (entry->per_cu->lang () == language_ada)
       {
 	/* We want to ensure that the Ada main function's name appears
 	   verbatim in the index.  However, this name will be of the
@@ -676,8 +581,7 @@ public:
 	      = m_name_to_value_set.emplace (c_str_view (name),
 					     std::set<symbol_value> ());
 	    std::set<symbol_value> &value_set = insertpair.first->second;
-	    value_set.emplace (symbol_value (dwarf_tag, cu_index, is_static,
-					     kind));
+	    value_set.emplace (symbol_value (tag, cu_index, is_static, kind));
 	  }
 
 	/* In order for the index to work when read back into gdb, it
@@ -703,7 +607,7 @@ public:
       = m_name_to_value_set.emplace (c_str_view (name),
 				     std::set<symbol_value> ());
     std::set<symbol_value> &value_set = insertpair.first->second;
-    value_set.emplace (symbol_value (dwarf_tag, cu_index, is_static, kind));
+    value_set.emplace (symbol_value (tag, cu_index, is_static, kind));
   }
 
   /* Build all the tables.  All symbols must be already inserted.
@@ -837,25 +741,6 @@ public:
     return m_abbrev_table.size ();
   }
 
-  /* Recurse into all "included" dependencies and store their symbols
-     as if they appeared in this psymtab.  */
-  void recursively_write_psymbols
-    (struct objfile *objfile,
-     partial_symtab *psymtab,
-     std::unordered_set<partial_symbol *> &psyms_seen,
-     int cu_index)
-  {
-    for (int i = 0; i < psymtab->number_of_dependencies; ++i)
-      if (psymtab->dependencies[i]->user != NULL)
-	recursively_write_psymbols
-	  (objfile, psymtab->dependencies[i], psyms_seen, cu_index);
-
-    write_psymbols (psyms_seen, psymtab->global_psymbols,
-		    cu_index, false, unit_kind::cu);
-    write_psymbols (psyms_seen, psymtab->static_psymbols,
-		    cu_index, true, unit_kind::cu);
-  }
-
   /* Return number of bytes the .debug_names section will have.  This
      must be called only after calling the build method.  */
   size_t bytes () const
@@ -888,6 +773,11 @@ public:
     m_debugstrlookup.file_write (file_str);
   }
 
+  void add_cu (dwarf2_per_cu_data *per_cu, offset_type index)
+  {
+    m_cu_index_htab.emplace (per_cu, index);
+  }
+
 private:
 
   /* Storage for symbol names mapping them to their .debug_str section
@@ -896,23 +786,23 @@ private:
   {
   public:
 
-    /* Object constructor to be called for current DWARF2_PER_OBJFILE.
+    /* Object constructor to be called for current DWARF2_PER_BFD.
        All .debug_str section strings are automatically stored.  */
-    debug_str_lookup (dwarf2_per_objfile *per_objfile)
-      : m_abfd (per_objfile->objfile->obfd),
-	m_per_objfile (per_objfile)
+    debug_str_lookup (dwarf2_per_bfd *per_bfd)
+      : m_abfd (per_bfd->obfd),
+	m_per_bfd (per_bfd)
     {
-      per_objfile->per_bfd->str.read (per_objfile->objfile);
-      if (per_objfile->per_bfd->str.buffer == NULL)
+      gdb_assert (per_bfd->str.readin);
+      if (per_bfd->str.buffer == NULL)
 	return;
-      for (const gdb_byte *data = per_objfile->per_bfd->str.buffer;
-	   data < (per_objfile->per_bfd->str.buffer
-		   + per_objfile->per_bfd->str.size);)
+      for (const gdb_byte *data = per_bfd->str.buffer;
+	   data < (per_bfd->str.buffer
+		   + per_bfd->str.size);)
 	{
 	  const char *const s = reinterpret_cast<const char *> (data);
 	  const auto insertpair
 	    = m_str_table.emplace (c_str_view (s),
-				   data - per_objfile->per_bfd->str.buffer);
+				   data - per_bfd->str.buffer);
 	  if (!insertpair.second)
 	    complaint (_("Duplicate string \"%s\" in "
 			 ".debug_str section [in module %s]"),
@@ -929,7 +819,7 @@ private:
       const auto it = m_str_table.find (c_str_view (s));
       if (it != m_str_table.end ())
 	return it->second;
-      const size_t offset = (m_per_objfile->per_bfd->str.size
+      const size_t offset = (m_per_bfd->str.size
 			     + m_str_add_buf.size ());
       m_str_table.emplace (c_str_view (s), offset);
       m_str_add_buf.append_cstr0 (s);
@@ -945,7 +835,7 @@ private:
   private:
     std::unordered_map<c_str_view, size_t, c_str_view_hasher> m_str_table;
     bfd *const m_abfd;
-    dwarf2_per_objfile *m_per_objfile;
+    dwarf2_per_bfd *m_per_bfd;
 
     /* Data to add at the end of .debug_str for new needed symbol names.  */
     data_buf m_str_add_buf;
@@ -1117,59 +1007,6 @@ private:
     offset_vec_tmpl<OffsetSize> m_name_table_entry_offs;
   };
 
-  /* Try to reconstruct original DWARF tag for given partial_symbol.
-     This function is not DWARF-5 compliant but it is sufficient for
-     GDB as a DWARF-5 index consumer.  */
-  static int psymbol_tag (const struct partial_symbol *psym)
-  {
-    domain_enum domain = psym->domain;
-    enum address_class aclass = psym->aclass;
-
-    switch (domain)
-      {
-      case VAR_DOMAIN:
-	switch (aclass)
-	  {
-	  case LOC_BLOCK:
-	    return DW_TAG_subprogram;
-	  case LOC_TYPEDEF:
-	    return DW_TAG_typedef;
-	  case LOC_COMPUTED:
-	  case LOC_CONST_BYTES:
-	  case LOC_OPTIMIZED_OUT:
-	  case LOC_STATIC:
-	    return DW_TAG_variable;
-	  case LOC_CONST:
-	    /* Note: It's currently impossible to recognize psyms as enum values
-	       short of reading the type info.  For now punt.  */
-	    return DW_TAG_variable;
-	  default:
-	    /* There are other LOC_FOO values that one might want to classify
-	       as variables, but dwarf2read.c doesn't currently use them.  */
-	    return DW_TAG_variable;
-	  }
-      case STRUCT_DOMAIN:
-	return DW_TAG_structure_type;
-      case MODULE_DOMAIN:
-	return DW_TAG_module;
-      default:
-	return 0;
-      }
-  }
-
-  /* Call insert for all partial symbols and mark them in PSYMS_SEEN.  */
-  void write_psymbols (std::unordered_set<partial_symbol *> &psyms_seen,
-		       const std::vector<partial_symbol *> &symbols,
-		       int cu_index, bool is_static, unit_kind kind)
-  {
-    for (partial_symbol *psym : symbols)
-      {
-	/* Only add a given psymbol once.  */
-	if (psyms_seen.insert (psym).second)
-	  insert (psym, cu_index, is_static, kind);
-      }
-  }
-
   /* Store value of each symbol.  */
   std::unordered_map<c_str_view, std::set<symbol_value>, c_str_view_hasher>
     m_name_to_value_set;
@@ -1202,43 +1039,23 @@ private:
 
   /* Temporary storage for Ada names.  */
   auto_obstack m_string_obstack;
+
+  cu_index_map m_cu_index_htab;
 };
 
 /* Return iff any of the needed offsets does not fit into 32-bit
    .debug_names section.  */
 
 static bool
-check_dwarf64_offsets (dwarf2_per_objfile *per_objfile)
+check_dwarf64_offsets (dwarf2_per_bfd *per_bfd)
 {
-  for (const auto &per_cu : per_objfile->per_bfd->all_comp_units)
+  for (const auto &per_cu : per_bfd->all_units)
     {
       if (to_underlying (per_cu->sect_off)
 	  >= (static_cast<uint64_t> (1) << 32))
 	return true;
     }
   return false;
-}
-
-/* The psyms_seen set is potentially going to be largish (~40k
-   elements when indexing a -g3 build of GDB itself).  Estimate the
-   number of elements in order to avoid too many rehashes, which
-   require rebuilding buckets and thus many trips to
-   malloc/free.  */
-
-static size_t
-psyms_seen_size (dwarf2_per_objfile *per_objfile)
-{
-  size_t psyms_count = 0;
-  for (const auto &per_cu : per_objfile->per_bfd->all_comp_units)
-    {
-      partial_symtab *psymtab = per_cu->v.psymtab;
-
-      if (psymtab != NULL && psymtab->user == NULL)
-	recursively_count_psymbols (psymtab, psyms_count);
-    }
-  /* Generating an index for gdb itself shows a ratio of
-     TOTAL_SEEN_SYMS/UNIQUE_SYMS or ~5.  4 seems like a good bet.  */
-  return psyms_count / 4;
 }
 
 /* Assert that FILE's size is EXPECTED_SIZE.  Assumes file's seek
@@ -1266,7 +1083,7 @@ write_gdbindex_1 (FILE *out_file,
 {
   data_buf contents;
   const offset_type size_of_header = 6 * sizeof (offset_type);
-  offset_type total_len = size_of_header;
+  uint64_t total_len = size_of_header;
 
   /* The version number.  */
   contents.append_offset (8);
@@ -1293,6 +1110,16 @@ write_gdbindex_1 (FILE *out_file,
 
   gdb_assert (contents.size () == size_of_header);
 
+  /* The maximum size of an index file is limited by the maximum value
+     capable of being represented by 'offset_type'.  Throw an error if
+     that length has been exceeded.  */
+  size_t max_size = ~(offset_type) 0;
+  if (total_len > max_size)
+    error (_("gdb-index maximum file size of %zu exceeded"), max_size);
+
+  if (out_file == nullptr)
+    return;
+
   contents.file_write (out_file);
   cu_list.file_write (out_file);
   types_cu_list.file_write (out_file);
@@ -1303,58 +1130,101 @@ write_gdbindex_1 (FILE *out_file,
   assert_file_size (out_file, total_len);
 }
 
+/* Write the contents of the internal "cooked" index.  */
+
+static void
+write_cooked_index (cooked_index *table,
+		    const cu_index_map &cu_index_htab,
+		    struct mapped_symtab *symtab)
+{
+  for (const cooked_index_entry *entry : table->all_entries ())
+    {
+      const auto it = cu_index_htab.find (entry->per_cu);
+      gdb_assert (it != cu_index_htab.cend ());
+
+      const char *name = entry->full_name (&symtab->m_string_obstack);
+
+      if (entry->per_cu->lang () == language_ada)
+	{
+	  /* In order for the index to work when read back into
+	     gdb, it has to use the encoded name, with any
+	     suffixes stripped.  */
+	  std::string encoded = ada_encode (name, false);
+	  name = obstack_strdup (&symtab->m_string_obstack,
+				 encoded.c_str ());
+	}
+      else if (entry->per_cu->lang () == language_cplus
+	       && (entry->flags & IS_LINKAGE) != 0)
+	{
+	  /* GDB never put C++ linkage names into .gdb_index.  The
+	     theory here is that a linkage name will normally be in
+	     the minimal symbols anyway, so including it in the index
+	     is usually redundant -- and the cases where it would not
+	     be redundant are rare and not worth supporting.  */
+	  continue;
+	}
+      else if ((entry->flags & IS_TYPE_DECLARATION) != 0)
+	{
+	  /* Don't add type declarations to the index.  */
+	  continue;
+	}
+
+      gdb_index_symbol_kind kind;
+      if (entry->tag == DW_TAG_subprogram)
+	kind = GDB_INDEX_SYMBOL_KIND_FUNCTION;
+      else if (entry->tag == DW_TAG_variable
+	       || entry->tag == DW_TAG_constant
+	       || entry->tag == DW_TAG_enumerator)
+	kind = GDB_INDEX_SYMBOL_KIND_VARIABLE;
+      else if (entry->tag == DW_TAG_module
+	       || entry->tag == DW_TAG_common_block)
+	kind = GDB_INDEX_SYMBOL_KIND_OTHER;
+      else
+	kind = GDB_INDEX_SYMBOL_KIND_TYPE;
+
+      add_index_entry (symtab, name, (entry->flags & IS_STATIC) != 0,
+		       kind, it->second);
+    }
+}
+
 /* Write contents of a .gdb_index section for OBJFILE into OUT_FILE.
    If OBJFILE has an associated dwz file, write contents of a .gdb_index
    section for that dwz file into DWZ_OUT_FILE.  If OBJFILE does not have an
    associated dwz file, DWZ_OUT_FILE must be NULL.  */
 
 static void
-write_gdbindex (dwarf2_per_objfile *per_objfile, FILE *out_file,
-		FILE *dwz_out_file)
+write_gdbindex (dwarf2_per_bfd *per_bfd, cooked_index *table,
+		FILE *out_file, FILE *dwz_out_file)
 {
-  struct objfile *objfile = per_objfile->objfile;
   mapped_symtab symtab;
   data_buf objfile_cu_list;
   data_buf dwz_cu_list;
 
-  /* While we're scanning CU's create a table that maps a psymtab pointer
+  /* While we're scanning CU's create a table that maps a dwarf2_per_cu_data
      (which is what addrmap records) to its index (which is what is recorded
      in the index file).  This will later be needed to write the address
      table.  */
-  psym_index_map cu_index_htab;
-  cu_index_htab.reserve (per_objfile->per_bfd->all_comp_units.size ());
+  cu_index_map cu_index_htab;
+  cu_index_htab.reserve (per_bfd->all_units.size ());
 
   /* Store out the .debug_type CUs, if any.  */
   data_buf types_cu_list;
 
   /* The CU list is already sorted, so we don't need to do additional
-     work here.  Also, the debug_types entries do not appear in
-     all_comp_units, but only in their own hash table.  */
+     work here.  */
 
-  std::unordered_set<partial_symbol *> psyms_seen
-    (psyms_seen_size (per_objfile));
   int counter = 0;
-  int types_counter = 0;
-  for (int i = 0; i < per_objfile->per_bfd->all_comp_units.size (); ++i)
+  for (int i = 0; i < per_bfd->all_units.size (); ++i)
     {
-      dwarf2_per_cu_data *per_cu
-	= per_objfile->per_bfd->all_comp_units[i].get ();
-      partial_symtab *psymtab = per_cu->v.psymtab;
+      dwarf2_per_cu_data *per_cu = per_bfd->all_units[i].get ();
 
-      int &this_counter = per_cu->is_debug_types ? types_counter : counter;
+      const auto insertpair = cu_index_htab.emplace (per_cu, counter);
+      gdb_assert (insertpair.second);
 
-      if (psymtab != NULL)
-	{
-	  if (psymtab->user == NULL)
-	    recursively_write_psymbols (objfile, psymtab, &symtab,
-					psyms_seen, this_counter);
+      /* See enhancement PR symtab/30838.  */
+      gdb_assert (!(per_cu->is_dwz && per_cu->is_debug_types));
 
-	  const auto insertpair = cu_index_htab.emplace (psymtab,
-							 this_counter);
-	  gdb_assert (insertpair.second);
-	}
-
-      /* The all_comp_units list contains CUs read from the objfile as well as
+      /* The all_units list contains CUs read from the objfile as well as
 	 from the eventual dwz file.  We need to place the entry in the
 	 corresponding index.  */
       data_buf &cu_list = (per_cu->is_debug_types
@@ -1371,18 +1241,21 @@ write_gdbindex (dwarf2_per_objfile *per_objfile, FILE *out_file,
 			       sig_type->signature);
 	}
       else
-	cu_list.append_uint (8, BFD_ENDIAN_LITTLE, per_cu->length);
+	cu_list.append_uint (8, BFD_ENDIAN_LITTLE, per_cu->length ());
 
-      ++this_counter;
+      ++counter;
     }
+
+  write_cooked_index (table, cu_index_htab, &symtab);
 
   /* Dump the address map.  */
   data_buf addr_vec;
-  write_address_map (per_objfile->per_bfd, addr_vec, cu_index_htab);
+  for (auto map : table->get_addrmaps ())
+    write_address_map (map, addr_vec, cu_index_htab);
 
   /* Now that we've processed all symbols we can shrink their cu_indices
      lists.  */
-  uniquify_cu_indices (&symtab);
+  symtab.minimize ();
 
   data_buf symtab_vec, constant_pool;
   if (symtab.n_elements == 0)
@@ -1407,37 +1280,29 @@ static const gdb_byte dwarf5_gdb_augmentation[] = { 'G', 'D', 'B', 0 };
    many bytes were expected to be written into OUT_FILE.  */
 
 static void
-write_debug_names (dwarf2_per_objfile *per_objfile,
+write_debug_names (dwarf2_per_bfd *per_bfd, cooked_index *table,
 		   FILE *out_file, FILE *out_file_str)
 {
-  const bool dwarf5_is_dwarf64 = check_dwarf64_offsets (per_objfile);
-  struct objfile *objfile = per_objfile->objfile;
+  const bool dwarf5_is_dwarf64 = check_dwarf64_offsets (per_bfd);
   const enum bfd_endian dwarf5_byte_order
-    = gdbarch_byte_order (objfile->arch ());
+    = bfd_big_endian (per_bfd->obfd) ? BFD_ENDIAN_BIG : BFD_ENDIAN_LITTLE;
 
   /* The CU list is already sorted, so we don't need to do additional
      work here.  Also, the debug_types entries do not appear in
-     all_comp_units, but only in their own hash table.  */
+     all_units, but only in their own hash table.  */
   data_buf cu_list;
   data_buf types_cu_list;
-  debug_names nametable (per_objfile, dwarf5_is_dwarf64, dwarf5_byte_order);
-  std::unordered_set<partial_symbol *>
-    psyms_seen (psyms_seen_size (per_objfile));
+  debug_names nametable (per_bfd, dwarf5_is_dwarf64, dwarf5_byte_order);
   int counter = 0;
   int types_counter = 0;
-  for (int i = 0; i < per_objfile->per_bfd->all_comp_units.size (); ++i)
+  for (int i = 0; i < per_bfd->all_units.size (); ++i)
     {
-      const dwarf2_per_cu_data *per_cu
-	= per_objfile->per_bfd->all_comp_units[i].get ();
-      partial_symtab *psymtab = per_cu->v.psymtab;
+      dwarf2_per_cu_data *per_cu = per_bfd->all_units[i].get ();
 
       int &this_counter = per_cu->is_debug_types ? types_counter : counter;
       data_buf &this_list = per_cu->is_debug_types ? types_cu_list : cu_list;
 
-      if (psymtab != nullptr && psymtab->user == nullptr)
-	nametable.recursively_write_psymbols (objfile, psymtab, psyms_seen,
-					      this_counter);
-
+      nametable.add_cu (per_cu, this_counter);
       this_list.append_uint (nametable.dwarf5_offset_size (),
 			     dwarf5_byte_order,
 			     to_underlying (per_cu->sect_off));
@@ -1445,9 +1310,11 @@ write_debug_names (dwarf2_per_objfile *per_objfile,
     }
 
    /* Verify that all units are represented.  */
-  gdb_assert (counter == (per_objfile->per_bfd->all_comp_units.size ()
-			  - per_objfile->per_bfd->tu_stats.nr_tus));
-  gdb_assert (types_counter == per_objfile->per_bfd->tu_stats.nr_tus);
+  gdb_assert (counter == per_bfd->all_comp_units.size ());
+  gdb_assert (types_counter == per_bfd->all_type_units.size ());
+
+  for (const cooked_index_entry *entry : table->all_entries ())
+    nametable.insert (entry);
 
   nametable.build ();
 
@@ -1577,27 +1444,16 @@ struct index_wip_file
 /* See dwarf-index-write.h.  */
 
 void
-write_psymtabs_to_index (dwarf2_per_objfile *per_objfile, const char *dir,
-			 const char *basename, const char *dwz_basename,
-			 dw_index_kind index_kind)
+write_dwarf_index (dwarf2_per_bfd *per_bfd, const char *dir,
+		   const char *basename, const char *dwz_basename,
+		   dw_index_kind index_kind)
 {
-  dwarf2_per_bfd *per_bfd = per_objfile->per_bfd;
-  struct objfile *objfile = per_objfile->objfile;
+  if (per_bfd->index_table == nullptr)
+    error (_("No debugging symbols"));
+  cooked_index *table = per_bfd->index_table->index_for_writing ();
 
-  if (per_objfile->per_bfd->using_index)
-    error (_("Cannot use an index to create the index"));
-
-  if (per_objfile->per_bfd->types.size () > 1)
+  if (per_bfd->types.size () > 1)
     error (_("Cannot make an index when the file has multiple .debug_types sections"));
-
-  if (per_bfd->partial_symtabs == nullptr
-      || !per_bfd->partial_symtabs->psymtabs
-      || !per_bfd->partial_symtabs->psymtabs_addrmap)
-    return;
-
-  struct stat st;
-  if (stat (objfile_name (objfile), &st) < 0)
-    perror_with_name (objfile_name (objfile));
 
   const char *index_suffix = (index_kind == dw_index_kind::DEBUG_NAMES
 			      ? INDEX5_SUFFIX : INDEX4_SUFFIX);
@@ -1612,13 +1468,13 @@ write_psymtabs_to_index (dwarf2_per_objfile *per_objfile, const char *dir,
     {
       index_wip_file str_wip_file (dir, basename, DEBUG_STR_SUFFIX);
 
-      write_debug_names (per_objfile, objfile_index_wip.out_file.get (),
+      write_debug_names (per_bfd, table, objfile_index_wip.out_file.get (),
 			 str_wip_file.out_file.get ());
 
       str_wip_file.finalize ();
     }
   else
-    write_gdbindex (per_objfile, objfile_index_wip.out_file.get (),
+    write_gdbindex (per_bfd, table, objfile_index_wip.out_file.get (),
 		    (dwz_index_wip.has_value ()
 		     ? dwz_index_wip->out_file.get () : NULL));
 
@@ -1656,10 +1512,8 @@ save_gdb_index_command (const char *arg, int from_tty)
 
   for (objfile *objfile : current_program_space->objfiles ())
     {
-      struct stat st;
-
       /* If the objfile does not correspond to an actual file, skip it.  */
-      if (stat (objfile_name (objfile), &st) < 0)
+      if ((objfile->flags & OBJF_NOT_FILENAME) != 0)
 	continue;
 
       dwarf2_per_objfile *per_objfile = get_dwarf2_per_objfile (objfile);
@@ -1675,8 +1529,8 @@ save_gdb_index_command (const char *arg, int from_tty)
 	      if (dwz != NULL)
 		dwz_basename = lbasename (dwz->filename ());
 
-	      write_psymtabs_to_index (per_objfile, arg, basename, dwz_basename,
-				       index_kind);
+	      write_dwarf_index (per_objfile->per_bfd, arg, basename,
+				 dwz_basename, index_kind);
 	    }
 	  catch (const gdb_exception_error &except)
 	    {
@@ -1689,10 +1543,87 @@ save_gdb_index_command (const char *arg, int from_tty)
     }
 }
 
+#if GDB_SELF_TEST
+#include "gdbsupport/selftest.h"
+
+namespace selftests {
+
+class pretend_data_buf : public data_buf
+{
+public:
+  /* Set the pretend size.  */
+  void set_pretend_size (size_t s) {
+    m_pretend_size = s;
+  }
+
+  /* Override size method of data_buf, returning the pretend size instead.  */
+  size_t size () const override {
+    return m_pretend_size;
+  }
+
+private:
+  size_t m_pretend_size = 0;
+};
+
+static void
+gdb_index ()
+{
+  pretend_data_buf cu_list;
+  pretend_data_buf types_cu_list;
+  pretend_data_buf addr_vec;
+  pretend_data_buf symtab_vec;
+  pretend_data_buf constant_pool;
+
+  const size_t size_of_header = 6 * sizeof (offset_type);
+
+  /* Test that an overly large index will throw an error.  */
+  symtab_vec.set_pretend_size (~(offset_type)0 - size_of_header);
+  constant_pool.set_pretend_size (1);
+
+  bool saw_exception = false;
+  try
+    {
+      write_gdbindex_1 (nullptr, cu_list, types_cu_list, addr_vec,
+			symtab_vec, constant_pool);
+    }
+  catch (const gdb_exception_error &e)
+    {
+      SELF_CHECK (e.reason == RETURN_ERROR);
+      SELF_CHECK (e.error == GENERIC_ERROR);
+      SELF_CHECK (e.message->find (_("gdb-index maximum file size of"))
+		  != std::string::npos);
+      SELF_CHECK (e.message->find (_("exceeded")) != std::string::npos);
+      saw_exception = true;
+    }
+  SELF_CHECK (saw_exception);
+
+  /* Test that the largest possible index will not throw an error.  */
+  constant_pool.set_pretend_size (0);
+
+  saw_exception = false;
+  try
+    {
+      write_gdbindex_1 (nullptr, cu_list, types_cu_list, addr_vec,
+			symtab_vec, constant_pool);
+    }
+  catch (const gdb_exception_error &e)
+    {
+      saw_exception = true;
+    }
+  SELF_CHECK (!saw_exception);
+}
+
+} /* selftests namespace.  */
+#endif
+
 void _initialize_dwarf_index_write ();
 void
 _initialize_dwarf_index_write ()
 {
+#if GDB_SELF_TEST
+  selftests::register_test ("gdb_index", selftests::gdb_index);
+#endif
+
   cmd_list_element *c = add_cmd ("gdb-index", class_files,
 				 save_gdb_index_command, _("\
 Save a gdb-index file.\n\

@@ -1,6 +1,6 @@
 /* Handle lists of commands, their decoding and documentation, for GDB.
 
-   Copyright (C) 1986-2022 Free Software Foundation, Inc.
+   Copyright (C) 1986-2023 Free Software Foundation, Inc.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -155,13 +155,13 @@ cmd_list_element::command_components () const
   if (this->prefix != nullptr)
     result = this->prefix->command_components ();
 
-  result.emplace_back (std::string (this->name));
+  result.emplace_back (this->name);
   return result;
 }
 
 /* Add element named NAME.
    Space for NAME and DOC must be allocated by the caller.
-   CLASS is the top level category into which commands are broken down
+   THECLASS is the top level category into which commands are broken down
    for "help" purposes.
    FUN should be the function to execute the command;
    it will get a character string as argument, with leading
@@ -494,13 +494,12 @@ empty_func (const char *args, int from_tty, cmd_list_element *c)
 /* Add element named NAME to command list LIST (the list for set/show
    or some sublist thereof).
    TYPE is set_cmd or show_cmd.
-   CLASS is as in add_cmd.
+   THECLASS is as in add_cmd.
    VAR_TYPE is the kind of thing we are setting.
-   VAR is address of the variable being controlled by this command.
-   SET_SETTING_FUNC is a pointer to an optional function callback used to set
-   the setting value.
-   GET_SETTING_FUNC is a pointer to an optional function callback used to get
-   the setting value.
+   EXTRA_LITERALS if non-NULL define extra literals to be accepted in lieu of
+   a number for integer variables.
+   ARGS is a pre-validated type-erased reference to the variable being
+   controlled by this command.
    DOC is the documentation string.  */
 
 static struct cmd_list_element *
@@ -508,6 +507,7 @@ add_set_or_show_cmd (const char *name,
 		     enum cmd_types type,
 		     enum command_class theclass,
 		     var_types var_type,
+		     const literal_def *extra_literals,
 		     const setting::erased_args &arg,
 		     const char *doc,
 		     struct cmd_list_element **list)
@@ -516,7 +516,7 @@ add_set_or_show_cmd (const char *name,
 
   gdb_assert (type == set_cmd || type == show_cmd);
   c->type = type;
-  c->var.emplace (var_type, arg);
+  c->var.emplace (var_type, extra_literals, arg);
 
   /* This needs to be something besides NULL so that this isn't
      treated as a help class.  */
@@ -524,14 +524,14 @@ add_set_or_show_cmd (const char *name,
   return c;
 }
 
-/* Add element named NAME to both the command SET_LIST and SHOW_LIST.
-   CLASS is as in add_cmd.  VAR_TYPE is the kind of thing we are
-   setting.  VAR is address of the variable being controlled by this
-   command.  If nullptr is given as VAR, then both SET_SETTING_FUNC and
-   GET_SETTING_FUNC must be provided. SET_SETTING_FUNC and GET_SETTING_FUNC are
-   callbacks used to access and modify the underlying property, whatever its
-   storage is.  SET_FUNC and SHOW_FUNC are the callback functions (if non-NULL).
-   SET_DOC, SHOW_DOC and HELP_DOC are the documentation strings.
+/* Add element named NAME to both command lists SET_LIST and SHOW_LIST.
+   THECLASS is as in add_cmd.  VAR_TYPE is the kind of thing we are
+   setting.  EXTRA_LITERALS if non-NULL define extra literals to be
+   accepted in lieu of a number for integer variables.  ARGS is a
+   pre-validated type-erased reference to the variable being controlled
+   by this command.  SET_FUNC and SHOW_FUNC are the callback functions
+   (if non-NULL).  SET_DOC, SHOW_DOC and HELP_DOC are the documentation
+   strings.
 
    Return the newly created set and show commands.  */
 
@@ -539,6 +539,7 @@ static set_show_commands
 add_setshow_cmd_full_erased (const char *name,
 			     enum command_class theclass,
 			     var_types var_type,
+			     const literal_def *extra_literals,
 			     const setting::erased_args &args,
 			     const char *set_doc, const char *show_doc,
 			     const char *help_doc,
@@ -562,14 +563,16 @@ add_setshow_cmd_full_erased (const char *name,
       full_set_doc = make_unique_xstrdup (set_doc);
       full_show_doc = make_unique_xstrdup (show_doc);
     }
-  set = add_set_or_show_cmd (name, set_cmd, theclass, var_type, args,
+  set = add_set_or_show_cmd (name, set_cmd, theclass, var_type,
+			     extra_literals, args,
 			     full_set_doc.release (), set_list);
   set->doc_allocated = 1;
 
   if (set_func != NULL)
     set->func = set_func;
 
-  show = add_set_or_show_cmd (name, show_cmd, theclass, var_type, args,
+  show = add_set_or_show_cmd (name, show_cmd, theclass, var_type,
+			      extra_literals, args,
 			      full_show_doc.release (), show_list);
   show->doc_allocated = 1;
   show->show_value_func = show_func;
@@ -579,6 +582,82 @@ add_setshow_cmd_full_erased (const char *name,
 
   return {set, show};
 }
+
+/* Completes on integer commands that support extra literals.  */
+
+static void
+integer_literals_completer (struct cmd_list_element *c,
+			    completion_tracker &tracker,
+			    const char *text, const char *word)
+{
+  const literal_def *extra_literals = c->var->extra_literals ();
+
+  if (*text == '\0')
+    {
+      tracker.add_completion (make_unique_xstrdup ("NUMBER"));
+      for (const literal_def *l = extra_literals;
+	   l->literal != nullptr;
+	   l++)
+	tracker.add_completion (make_unique_xstrdup (l->literal));
+    }
+  else
+    for (const literal_def *l = extra_literals;
+	 l->literal != nullptr;
+	 l++)
+      if (startswith (l->literal, text))
+	tracker.add_completion (make_unique_xstrdup (l->literal));
+}
+
+/* Add element named NAME to both command lists SET_LIST and SHOW_LIST.
+   THECLASS is as in add_cmd.  VAR_TYPE is the kind of thing we are
+   setting.  VAR is address of the variable being controlled by this
+   command.  EXTRA_LITERALS if non-NULL define extra literals to be
+   accepted in lieu of a number for integer variables.  If nullptr is
+   given as VAR, then both SET_SETTING_FUNC and GET_SETTING_FUNC must
+   be provided.  SET_SETTING_FUNC and GET_SETTING_FUNC are callbacks
+   used to access and modify the underlying property, whatever its
+   storage is.  SET_FUNC and SHOW_FUNC are the callback functions
+   (if non-NULL).  SET_DOC, SHOW_DOC and HELP_DOC are the
+   documentation strings.
+
+   Return the newly created set and show commands.  */
+
+template<typename T>
+static set_show_commands
+add_setshow_cmd_full (const char *name,
+		      enum command_class theclass,
+		      var_types var_type, T *var,
+		      const literal_def *extra_literals,
+		      const char *set_doc, const char *show_doc,
+		      const char *help_doc,
+		      typename setting_func_types<T>::set set_setting_func,
+		      typename setting_func_types<T>::get get_setting_func,
+		      cmd_func_ftype *set_func,
+		      show_value_ftype *show_func,
+		      struct cmd_list_element **set_list,
+		      struct cmd_list_element **show_list)
+{
+  auto erased_args
+    = setting::erase_args (var_type, var,
+			   set_setting_func, get_setting_func);
+  auto cmds = add_setshow_cmd_full_erased (name,
+					   theclass,
+					   var_type, extra_literals,
+					   erased_args,
+					   set_doc, show_doc,
+					   help_doc,
+					   set_func,
+					   show_func,
+					   set_list,
+					   show_list);
+
+  if (extra_literals != nullptr)
+    set_cmd_completer (cmds.set, integer_literals_completer);
+
+  return cmds;
+}
+
+/* Same as above but omitting EXTRA_LITERALS.  */
 
 template<typename T>
 static set_show_commands
@@ -594,23 +673,14 @@ add_setshow_cmd_full (const char *name,
 		      struct cmd_list_element **set_list,
 		      struct cmd_list_element **show_list)
 {
-  auto erased_args
-    = setting::erase_args (var_type, var,
-			   set_setting_func, get_setting_func);
-
-  return add_setshow_cmd_full_erased (name,
-				      theclass,
-				      var_type, erased_args,
-				      set_doc, show_doc,
-				      help_doc,
-				      set_func,
-				      show_func,
-				      set_list,
-				      show_list);
+  return add_setshow_cmd_full (name, theclass, var_type, var, nullptr,
+			       set_doc, show_doc, help_doc,
+			       set_setting_func, get_setting_func,
+			       set_func, show_func, set_list, show_list);
 }
 
 /* Add element named NAME to command list LIST (the list for set or
-   some sublist thereof).  CLASS is as in add_cmd.  ENUMLIST is a list
+   some sublist thereof).  THECLASS is as in add_cmd.  ENUMLIST is a list
    of strings which may follow NAME.  VAR is address of the variable
    which will contain the matching string (from ENUMLIST).  */
 
@@ -674,7 +744,7 @@ add_setshow_enum_cmd (const char *name, command_class theclass,
 const char * const auto_boolean_enums[] = { "on", "off", "auto", NULL };
 
 /* Add an auto-boolean command named NAME to both the set and show
-   command list lists.  CLASS is as in add_cmd.  VAR is address of the
+   command list lists.  THECLASS is as in add_cmd.  VAR is address of the
    variable which will contain the value.  DOC is the documentation
    string.  FUNC is the corresponding callback.  */
 
@@ -730,7 +800,7 @@ add_setshow_auto_boolean_cmd (const char *name, command_class theclass,
 const char * const boolean_enums[] = { "on", "off", NULL };
 
 /* Add element named NAME to both the set and show command LISTs (the
-   list for set/show or some sublist thereof).  CLASS is as in
+   list for set/show or some sublist thereof).  THECLASS is as in
    add_cmd.  VAR is address of the variable which will contain the
    value.  SET_DOC and SHOW_DOC are the documentation strings.
    Returns the new command element.  */
@@ -975,28 +1045,60 @@ add_setshow_optional_filename_cmd (const char *name, command_class theclass,
   return cmds;
 }
 
-/* Completes on literal "unlimited".  Used by integer commands that
-   support a special "unlimited" value.  */
-
-static void
-integer_unlimited_completer (struct cmd_list_element *ignore,
-			     completion_tracker &tracker,
-			     const char *text, const char *word)
-{
-  static const char * const keywords[] =
-    {
-      "unlimited",
-      NULL,
-    };
-
-  complete_on_enum (tracker, keywords, text, word);
-}
-
 /* Add element named NAME to both the set and show command LISTs (the
-   list for set/show or some sublist thereof).  CLASS is as in
+   list for set/show or some sublist thereof).  THECLASS is as in
    add_cmd.  VAR is address of the variable which will contain the
    value.  SET_DOC and SHOW_DOC are the documentation strings.  This
    function is only used in Python API.  Please don't use it elsewhere.  */
+
+set_show_commands
+add_setshow_integer_cmd (const char *name, enum command_class theclass,
+			 int *var, const literal_def *extra_literals,
+			 const char *set_doc, const char *show_doc,
+			 const char *help_doc,
+			 cmd_func_ftype *set_func,
+			 show_value_ftype *show_func,
+			 struct cmd_list_element **set_list,
+			 struct cmd_list_element **show_list)
+{
+  set_show_commands commands
+    = add_setshow_cmd_full<int> (name, theclass, var_integer, var,
+				 extra_literals, set_doc, show_doc,
+				 help_doc, nullptr, nullptr, set_func,
+				 show_func, set_list, show_list);
+  return commands;
+}
+
+/* Same as above but using a getter and a setter function instead of a pointer
+   to a global storage buffer.  */
+
+set_show_commands
+add_setshow_integer_cmd (const char *name, command_class theclass,
+			 const literal_def *extra_literals,
+			 const char *set_doc, const char *show_doc,
+			 const char *help_doc,
+			 setting_func_types<int>::set set_func,
+			 setting_func_types<int>::get get_func,
+			 show_value_ftype *show_func,
+			 cmd_list_element **set_list,
+			 cmd_list_element **show_list)
+{
+  auto cmds = add_setshow_cmd_full<int> (name, theclass, var_integer, nullptr,
+					 extra_literals, set_doc, show_doc,
+					 help_doc, set_func, get_func, nullptr,
+					 show_func, set_list, show_list);
+  return cmds;
+}
+
+/* Accept `unlimited' or 0, translated internally to INT_MAX.  */
+const literal_def integer_unlimited_literals[] =
+  {
+    { "unlimited", INT_MAX, 0 },
+    { nullptr }
+  };
+
+/* Same as above but using `integer_unlimited_literals', with a pointer
+   to a global storage buffer.  */
 
 set_show_commands
 add_setshow_integer_cmd (const char *name, enum command_class theclass,
@@ -1010,12 +1112,10 @@ add_setshow_integer_cmd (const char *name, enum command_class theclass,
 {
   set_show_commands commands
     = add_setshow_cmd_full<int> (name, theclass, var_integer, var,
+				 integer_unlimited_literals,
 				 set_doc, show_doc, help_doc,
 				 nullptr, nullptr, set_func,
 				 show_func, set_list, show_list);
-
-  set_cmd_completer (commands.set, integer_unlimited_completer);
-
   return commands;
 }
 
@@ -1033,12 +1133,10 @@ add_setshow_integer_cmd (const char *name, command_class theclass,
 			 cmd_list_element **show_list)
 {
   auto cmds = add_setshow_cmd_full<int> (name, theclass, var_integer, nullptr,
+					 integer_unlimited_literals,
 					 set_doc, show_doc, help_doc, set_func,
 					 get_func, nullptr, show_func, set_list,
 					 show_list);
-
-  set_cmd_completer (cmds.set, integer_unlimited_completer);
-
   return cmds;
 }
 
@@ -1046,6 +1144,101 @@ add_setshow_integer_cmd (const char *name, command_class theclass,
    list for set/show or some sublist thereof).  CLASS is as in
    add_cmd.  VAR is address of the variable which will contain the
    value.  SET_DOC and SHOW_DOC are the documentation strings.  */
+
+set_show_commands
+add_setshow_pinteger_cmd (const char *name, enum command_class theclass,
+			  int *var, const literal_def *extra_literals,
+			  const char *set_doc, const char *show_doc,
+			  const char *help_doc,
+			  cmd_func_ftype *set_func,
+			  show_value_ftype *show_func,
+			  struct cmd_list_element **set_list,
+			  struct cmd_list_element **show_list)
+{
+  set_show_commands commands
+    = add_setshow_cmd_full<int> (name, theclass, var_pinteger, var,
+				 extra_literals, set_doc, show_doc,
+				 help_doc, nullptr, nullptr, set_func,
+				 show_func, set_list, show_list);
+  return commands;
+}
+
+/* Same as above but using a getter and a setter function instead of a pointer
+   to a global storage buffer.  */
+
+set_show_commands
+add_setshow_pinteger_cmd (const char *name, command_class theclass,
+			  const literal_def *extra_literals,
+			  const char *set_doc, const char *show_doc,
+			  const char *help_doc,
+			  setting_func_types<int>::set set_func,
+			  setting_func_types<int>::get get_func,
+			  show_value_ftype *show_func,
+			  cmd_list_element **set_list,
+			  cmd_list_element **show_list)
+{
+  auto cmds = add_setshow_cmd_full<int> (name, theclass, var_pinteger, nullptr,
+					 extra_literals, set_doc, show_doc,
+					 help_doc, set_func, get_func, nullptr,
+					 show_func, set_list, show_list);
+  return cmds;
+}
+
+/* Add element named NAME to both the set and show command LISTs (the
+   list for set/show or some sublist thereof).  THECLASS is as in
+   add_cmd.  VAR is address of the variable which will contain the
+   value.  SET_DOC and SHOW_DOC are the documentation strings.  */
+
+set_show_commands
+add_setshow_uinteger_cmd (const char *name, enum command_class theclass,
+			  unsigned int *var, const literal_def *extra_literals,
+			  const char *set_doc, const char *show_doc,
+			  const char *help_doc,
+			  cmd_func_ftype *set_func,
+			  show_value_ftype *show_func,
+			  struct cmd_list_element **set_list,
+			  struct cmd_list_element **show_list)
+{
+  set_show_commands commands
+    = add_setshow_cmd_full<unsigned int> (name, theclass, var_uinteger, var,
+					  extra_literals, set_doc, show_doc,
+					  help_doc, nullptr, nullptr, set_func,
+					  show_func, set_list, show_list);
+  return commands;
+}
+
+/* Same as above but using a getter and a setter function instead of a pointer
+   to a global storage buffer.  */
+
+set_show_commands
+add_setshow_uinteger_cmd (const char *name, command_class theclass,
+			  const literal_def *extra_literals,
+			  const char *set_doc, const char *show_doc,
+			  const char *help_doc,
+			  setting_func_types<unsigned int>::set set_func,
+			  setting_func_types<unsigned int>::get get_func,
+			  show_value_ftype *show_func,
+			  cmd_list_element **set_list,
+			  cmd_list_element **show_list)
+{
+  auto cmds = add_setshow_cmd_full<unsigned int> (name, theclass, var_uinteger,
+						  nullptr, extra_literals,
+						  set_doc, show_doc, help_doc,
+						  set_func, get_func, nullptr,
+						  show_func, set_list,
+						  show_list);
+  return cmds;
+}
+
+/* Accept `unlimited' or 0, translated internally to UINT_MAX.  */
+const literal_def uinteger_unlimited_literals[] =
+  {
+    { "unlimited", UINT_MAX, 0 },
+    { nullptr }
+  };
+
+/* Same as above but using `uinteger_unlimited_literals', with a pointer
+   to a global storage buffer.  */
 
 set_show_commands
 add_setshow_uinteger_cmd (const char *name, enum command_class theclass,
@@ -1059,12 +1252,10 @@ add_setshow_uinteger_cmd (const char *name, enum command_class theclass,
 {
   set_show_commands commands
     = add_setshow_cmd_full<unsigned int> (name, theclass, var_uinteger, var,
-					  set_doc, show_doc, help_doc,
-					  nullptr, nullptr, set_func,
-					  show_func, set_list, show_list);
-
-  set_cmd_completer (commands.set, integer_unlimited_completer);
-
+					  uinteger_unlimited_literals,
+					  set_doc, show_doc, help_doc, nullptr,
+					  nullptr, set_func, show_func,
+					  set_list, show_list);
   return commands;
 }
 
@@ -1082,18 +1273,17 @@ add_setshow_uinteger_cmd (const char *name, command_class theclass,
 			  cmd_list_element **show_list)
 {
   auto cmds = add_setshow_cmd_full<unsigned int> (name, theclass, var_uinteger,
-						  nullptr, set_doc, show_doc,
-						  help_doc, set_func, get_func,
-						  nullptr, show_func, set_list,
+						  nullptr,
+						  uinteger_unlimited_literals,
+						  set_doc, show_doc, help_doc,
+						  set_func, get_func, nullptr,
+						  show_func, set_list,
 						  show_list);
-
-  set_cmd_completer (cmds.set, integer_unlimited_completer);
-
   return cmds;
 }
 
 /* Add element named NAME to both the set and show command LISTs (the
-   list for set/show or some sublist thereof).  CLASS is as in
+   list for set/show or some sublist thereof).  THECLASS is as in
    add_cmd.  VAR is address of the variable which will contain the
    value.  SET_DOC and SHOW_DOC are the documentation strings.  */
 
@@ -1107,7 +1297,7 @@ add_setshow_zinteger_cmd (const char *name, enum command_class theclass,
 			  struct cmd_list_element **set_list,
 			  struct cmd_list_element **show_list)
 {
-  return add_setshow_cmd_full<int> (name, theclass, var_zinteger, var,
+  return add_setshow_cmd_full<int> (name, theclass, var_integer, var,
 				    set_doc, show_doc, help_doc,
 				    nullptr, nullptr, set_func,
 				    show_func, set_list, show_list);
@@ -1126,11 +1316,21 @@ add_setshow_zinteger_cmd (const char *name, command_class theclass,
 			  cmd_list_element **set_list,
 			  cmd_list_element **show_list)
 {
-  return add_setshow_cmd_full<int> (name, theclass, var_zinteger, nullptr,
+  return add_setshow_cmd_full<int> (name, theclass, var_integer, nullptr,
 				    set_doc, show_doc, help_doc, set_func,
 				    get_func, nullptr, show_func, set_list,
 				    show_list);
 }
+
+/* Accept `unlimited' or -1, using -1 internally.  */
+const literal_def pinteger_unlimited_literals[] =
+  {
+    { "unlimited", -1, -1 },
+    { nullptr }
+  };
+
+/* Same as above but using `pinteger_unlimited_literals', with a pointer
+   to a global storage buffer.  */
 
 set_show_commands
 add_setshow_zuinteger_unlimited_cmd (const char *name,
@@ -1145,13 +1345,11 @@ add_setshow_zuinteger_unlimited_cmd (const char *name,
 				     struct cmd_list_element **show_list)
 {
   set_show_commands commands
-    = add_setshow_cmd_full<int> (name, theclass, var_zuinteger_unlimited, var,
+    = add_setshow_cmd_full<int> (name, theclass, var_pinteger, var,
+				 pinteger_unlimited_literals,
 				 set_doc, show_doc, help_doc, nullptr,
 				 nullptr, set_func, show_func, set_list,
 				 show_list);
-
-  set_cmd_completer (commands.set, integer_unlimited_completer);
-
   return commands;
 }
 
@@ -1169,18 +1367,16 @@ add_setshow_zuinteger_unlimited_cmd (const char *name, command_class theclass,
 				     cmd_list_element **show_list)
 {
   auto cmds
-    = add_setshow_cmd_full<int> (name, theclass, var_zuinteger_unlimited,
-				 nullptr, set_doc, show_doc, help_doc, set_func,
+    = add_setshow_cmd_full<int> (name, theclass, var_pinteger, nullptr,
+				 pinteger_unlimited_literals,
+				 set_doc, show_doc, help_doc, set_func,
 				 get_func, nullptr, show_func, set_list,
 				 show_list);
-
-  set_cmd_completer (cmds.set, integer_unlimited_completer);
-
   return cmds;
 }
 
 /* Add element named NAME to both the set and show command LISTs (the
-   list for set/show or some sublist thereof).  CLASS is as in
+   list for set/show or some sublist thereof).  THECLASS is as in
    add_cmd.  VAR is address of the variable which will contain the
    value.  SET_DOC and SHOW_DOC are the documentation strings.  */
 
@@ -1194,7 +1390,7 @@ add_setshow_zuinteger_cmd (const char *name, enum command_class theclass,
 			   struct cmd_list_element **set_list,
 			   struct cmd_list_element **show_list)
 {
-  return add_setshow_cmd_full<unsigned int> (name, theclass, var_zuinteger,
+  return add_setshow_cmd_full<unsigned int> (name, theclass, var_uinteger,
 					     var, set_doc, show_doc, help_doc,
 					     nullptr, nullptr, set_func,
 					     show_func, set_list, show_list);
@@ -1213,7 +1409,7 @@ add_setshow_zuinteger_cmd (const char *name, command_class theclass,
 			   cmd_list_element **set_list,
 			   cmd_list_element **show_list)
 {
-  return add_setshow_cmd_full<unsigned int> (name, theclass, var_zuinteger,
+  return add_setshow_cmd_full<unsigned int> (name, theclass, var_uinteger,
 					     nullptr, set_doc, show_doc,
 					     help_doc, set_func, get_func,
 					     nullptr, show_func, set_list,
@@ -1347,6 +1543,18 @@ fput_command_name_styled (const cmd_list_element &c, struct ui_file *stream)
 		  prefixname.c_str (), c.name);
 }
 
+/* True if ALIAS has a user-defined documentation.  */
+
+static bool
+user_documented_alias (const cmd_list_element &alias)
+{
+  gdb_assert (alias.is_alias ());
+  /* Alias is user documented if it has an allocated documentation
+     that differs from the aliased command.  */
+  return (alias.doc_allocated
+	  && strcmp (alias.doc, alias.alias_target->doc) != 0);
+}
+
 /* Print the definition of alias C using title style for alias
    and aliased command.  */
 
@@ -1355,27 +1563,29 @@ fput_alias_definition_styled (const cmd_list_element &c,
 			      struct ui_file *stream)
 {
   gdb_assert (c.is_alias ());
-  fputs_filtered ("  alias ", stream);
+  gdb_puts ("  alias ", stream);
   fput_command_name_styled (c, stream);
-  fprintf_filtered (stream, " = ");
+  gdb_printf (stream, " = ");
   fput_command_name_styled (*c.alias_target, stream);
-  fprintf_filtered (stream, " %s\n", c.default_args.c_str ());
+  gdb_printf (stream, " %s\n", c.default_args.c_str ());
 }
 
-/* Print the definition of the aliases of CMD that have default args.  */
+/* Print the definition of CMD aliases not deprecated and having default args
+   and not specifically documented by the user.  */
 
 static void
 fput_aliases_definition_styled (const cmd_list_element &cmd,
 				struct ui_file *stream)
 {
   for (const cmd_list_element &alias : cmd.aliases)
-    if (!alias.cmd_deprecated && !alias.default_args.empty ())
+    if (!alias.cmd_deprecated
+	&& !user_documented_alias (alias)
+	&& !alias.default_args.empty ())
       fput_alias_definition_styled (alias, stream);
 }
 
-
-/* If C has one or more aliases, style print the name of C and
-   the name of its aliases, separated by commas.
+/* If C has one or more aliases, style print the name of C and the name of its
+   aliases not documented specifically by the user, separated by commas.
    If ALWAYS_FPUT_C_NAME, print the name of C even if it has no aliases.
    If one or more names are printed, POSTFIX is printed after the last name.
 */
@@ -1387,11 +1597,11 @@ fput_command_names_styled (const cmd_list_element &c,
 {
   /* First, check if we are going to print something.  That is, either if
      ALWAYS_FPUT_C_NAME is true or if there exists at least one non-deprecated
-     alias.  */
+     alias not documented specifically by the user.  */
 
   auto print_alias = [] (const cmd_list_element &alias)
     {
-      return !alias.cmd_deprecated;
+      return !alias.cmd_deprecated && !user_documented_alias (alias);
     };
 
   bool print_something = always_fput_c_name;
@@ -1413,13 +1623,13 @@ fput_command_names_styled (const cmd_list_element &c,
       if (!print_alias (alias))
 	continue;
 
-      fputs_filtered (", ", stream);
+      gdb_puts (", ", stream);
       stream->wrap_here (3);
       fput_command_name_styled (alias, stream);
     }
 
   if (print_something)
-    fputs_filtered (postfix, stream);
+    gdb_puts (postfix, stream);
 }
 
 /* If VERBOSE, print the full help for command C and highlight the
@@ -1427,29 +1637,28 @@ fput_command_names_styled (const cmd_list_element &c,
    otherwise print only one-line help for command C.  */
 
 static void
-print_doc_of_command (const cmd_list_element &c, const char *prefix,
-		      bool verbose, compiled_regex &highlight,
-		      struct ui_file *stream)
+print_doc_of_command (const cmd_list_element &c, bool verbose,
+		      compiled_regex &highlight, struct ui_file *stream)
 {
   /* When printing the full documentation, add a line to separate
      this documentation from the previous command help, in the likely
      case that apropos finds several commands.  */
   if (verbose)
-    fputs_filtered ("\n", stream);
+    gdb_puts ("\n", stream);
 
   fput_command_names_styled (c, true,
 			     verbose ? "" : " -- ", stream);
   if (verbose)
     {
-      fputs_filtered ("\n", stream);
+      gdb_puts ("\n", stream);
       fput_aliases_definition_styled (c, stream);
       fputs_highlighted (c.doc, highlight, stream);
-      fputs_filtered ("\n", stream);
+      gdb_puts ("\n", stream);
     }
   else
     {
       print_doc_line (stream, c.doc, false);
-      fputs_filtered ("\n", stream);
+      gdb_puts ("\n", stream);
       fput_aliases_definition_styled (c, stream);
     }
 }
@@ -1464,7 +1673,7 @@ print_doc_of_command (const cmd_list_element &c, const char *prefix,
 void
 apropos_cmd (struct ui_file *stream,
 	     struct cmd_list_element *commandlist,
-	     bool verbose, compiled_regex &regex, const char *prefix)
+	     bool verbose, compiled_regex &regex)
 {
   struct cmd_list_element *c;
   int returnvalue;
@@ -1472,11 +1681,11 @@ apropos_cmd (struct ui_file *stream,
   /* Walk through the commands.  */
   for (c=commandlist;c;c=c->next)
     {
-      if (c->is_alias ())
+      if (c->is_alias () && !user_documented_alias (*c))
 	{
-	  /* Command aliases/abbreviations are skipped to ensure we print the
-	     doc of a command only once, when encountering the aliased
-	     command.  */
+	  /* Command aliases/abbreviations not specifically documented by the
+	     user are skipped to ensure we print the doc of a command only once,
+	     when encountering the aliased command.  */
 	  continue;
 	}
 
@@ -1488,7 +1697,7 @@ apropos_cmd (struct ui_file *stream,
 	  /* Try to match against the name.  */
 	  returnvalue = regex.search (c->name, name_len, 0, name_len, NULL);
 	  if (returnvalue >= 0)
-	    print_doc_of_command (*c, prefix, verbose, regex, stream);
+	    print_doc_of_command (*c, verbose, regex, stream);
 
 	  /* Try to match against the name of the aliases.  */
 	  for (const cmd_list_element &alias : c->aliases)
@@ -1497,7 +1706,7 @@ apropos_cmd (struct ui_file *stream,
 	      returnvalue = regex.search (alias.name, name_len, 0, name_len, NULL);
 	      if (returnvalue >= 0)
 		{
-		  print_doc_of_command (*c, prefix, verbose, regex, stream);
+		  print_doc_of_command (*c, verbose, regex, stream);
 		  break;
 		}
 	    }
@@ -1508,15 +1717,14 @@ apropos_cmd (struct ui_file *stream,
 
 	  /* Try to match against documentation.  */
 	  if (regex.search (c->doc, doc_len, 0, doc_len, NULL) >= 0)
-	    print_doc_of_command (*c, prefix, verbose, regex, stream);
+	    print_doc_of_command (*c, verbose, regex, stream);
 	}
       /* Check if this command has subcommands.  */
       if (c->is_prefix ())
 	{
 	  /* Recursively call ourselves on the subcommand list,
 	     passing the right prefix in.  */
-	  apropos_cmd (stream, *c->subcommands, verbose, regex,
-		       c->prefixname ().c_str ());
+	  apropos_cmd (stream, *c->subcommands, verbose, regex);
 	}
     }
 }
@@ -1569,17 +1777,30 @@ help_cmd (const char *command, struct ui_file *stream)
      number of this class so that the commands in the class will be
      listed.  */
 
-  /* If the user asked 'help somecommand' and there is no alias,
-     the false indicates to not output the (single) command name.  */
-  fput_command_names_styled (*c, false, "\n", stream);
-  fput_aliases_definition_styled (*c, stream);
-  fputs_filtered (c->doc, stream);
-  fputs_filtered ("\n", stream);
+  if (alias == nullptr || !user_documented_alias (*alias))
+    {
+      /* Case of a normal command, or an alias not explicitly
+	 documented by the user.  */
+      /* If the user asked 'help somecommand' and there is no alias,
+	 the false indicates to not output the (single) command name.  */
+      fput_command_names_styled (*c, false, "\n", stream);
+      fput_aliases_definition_styled (*c, stream);
+      gdb_puts (c->doc, stream);
+    }
+  else
+    {
+      /* Case of an alias explicitly documented by the user.
+	 Only output the alias definition and its explicit documentation.  */
+      fput_alias_definition_styled (*alias, stream);
+      fput_command_names_styled (*alias, false, "\n", stream);
+      gdb_puts (alias->doc, stream);
+    }
+  gdb_puts ("\n", stream);
 
   if (!c->is_prefix () && !c->is_command_class_help ())
     return;
 
-  fprintf_filtered (stream, "\n");
+  gdb_printf (stream, "\n");
 
   /* If this is a prefix command, print it's subcommands.  */
   if (c->is_prefix ())
@@ -1591,17 +1812,17 @@ help_cmd (const char *command, struct ui_file *stream)
     help_list (cmdlist, "", c->theclass, stream);
 
   if (c->hook_pre || c->hook_post)
-    fprintf_filtered (stream,
-		      "\nThis command has a hook (or hooks) defined:\n");
+    gdb_printf (stream,
+		"\nThis command has a hook (or hooks) defined:\n");
 
   if (c->hook_pre)
-    fprintf_filtered (stream,
-		      "\tThis command is run after  : %s (pre hook)\n",
-		    c->hook_pre->name);
+    gdb_printf (stream,
+		"\tThis command is run after  : %s (pre hook)\n",
+		c->hook_pre->name);
   if (c->hook_post)
-    fprintf_filtered (stream,
-		      "\tThis command is run before : %s (post hook)\n",
-		    c->hook_post->name);
+    gdb_printf (stream,
+		"\tThis command is run before : %s (post hook)\n",
+		c->hook_post->name);
 }
 
 /*
@@ -1609,7 +1830,7 @@ help_cmd (const char *command, struct ui_file *stream)
  *
  * LIST is the list.
  * CMDTYPE is the prefix to use in the title string.
- * CLASS is the class with which to list the nodes of this list (see
+ * THECLASS is the class with which to list the nodes of this list (see
  * documentation for help_cmd_list below),  As usual, ALL_COMMANDS for
  * everything, ALL_CLASSES for just classes, and non-negative for only things
  * in a specific class.
@@ -1640,39 +1861,39 @@ help_list (struct cmd_list_element *list, const char *cmdtype,
     }
 
   if (theclass == all_classes)
-    fprintf_filtered (stream, "List of classes of %scommands:\n\n", cmdtype2);
+    gdb_printf (stream, "List of classes of %scommands:\n\n", cmdtype2);
   else
-    fprintf_filtered (stream, "List of %scommands:\n\n", cmdtype2);
+    gdb_printf (stream, "List of %scommands:\n\n", cmdtype2);
 
   help_cmd_list (list, theclass, theclass >= 0, stream);
 
   if (theclass == all_classes)
     {
-      fprintf_filtered (stream, "\n\
+      gdb_printf (stream, "\n\
 Type \"help%s\" followed by a class name for a list of commands in ",
-			cmdtype1);
+		  cmdtype1);
       stream->wrap_here (0);
-      fprintf_filtered (stream, "that class.");
+      gdb_printf (stream, "that class.");
 
-      fprintf_filtered (stream, "\n\
+      gdb_printf (stream, "\n\
 Type \"help all\" for the list of all commands.");
     }
 
-  fprintf_filtered (stream, "\nType \"help%s\" followed by %scommand name ",
-		    cmdtype1, cmdtype2);
+  gdb_printf (stream, "\nType \"help%s\" followed by %scommand name ",
+	      cmdtype1, cmdtype2);
   stream->wrap_here (0);
-  fputs_filtered ("for ", stream);
+  gdb_puts ("for ", stream);
   stream->wrap_here (0);
-  fputs_filtered ("full ", stream);
+  gdb_puts ("full ", stream);
   stream->wrap_here (0);
-  fputs_filtered ("documentation.\n", stream);
-  fputs_filtered ("Type \"apropos word\" to search "
-		  "for commands related to \"word\".\n", stream);
-  fputs_filtered ("Type \"apropos -v word\" for full documentation", stream);
+  gdb_puts ("documentation.\n", stream);
+  gdb_puts ("Type \"apropos word\" to search "
+	    "for commands related to \"word\".\n", stream);
+  gdb_puts ("Type \"apropos -v word\" for full documentation", stream);
   stream->wrap_here (0);
-  fputs_filtered (" of commands related to \"word\".\n", stream);
-  fputs_filtered ("Command name abbreviations are allowed if unambiguous.\n",
-		  stream);
+  gdb_puts (" of commands related to \"word\".\n", stream);
+  gdb_puts ("Command name abbreviations are allowed if unambiguous.\n",
+	    stream);
 }
 
 static void
@@ -1690,7 +1911,7 @@ help_all (struct ui_file *stream)
 
       if (c->is_command_class_help ())
 	{
-	  fprintf_filtered (stream, "\nCommand class: %s\n\n", c->name);
+	  gdb_printf (stream, "\nCommand class: %s\n\n", c->name);
 	  help_cmd_list (cmdlist, c->theclass, true, stream);
 	}
     }
@@ -1708,7 +1929,7 @@ help_all (struct ui_file *stream)
 	{
 	  if (!seen_unclassified)
 	    {
-	      fprintf_filtered (stream, "\nUnclassified commands\n\n");
+	      gdb_printf (stream, "\nUnclassified commands\n\n");
 	      seen_unclassified = 1;
 	    }
 	  print_help_for_command (*c, true, stream);
@@ -1756,7 +1977,7 @@ print_doc_line (struct ui_file *stream, const char *str,
     }
   else
     line_buffer[p - str] = '\0';
-  fputs_filtered (line_buffer, stream);
+  gdb_puts (line_buffer, stream);
 }
 
 /* Print one-line help for command C.
@@ -1768,7 +1989,7 @@ print_help_for_command (const cmd_list_element &c,
 {
   fput_command_names_styled (c, true, " -- ", stream);
   print_doc_line (stream, c.doc, false);
-  fputs_filtered ("\n", stream);
+  gdb_puts ("\n", stream);
   if (!c.default_args.empty ())
     fput_alias_definition_styled (c, stream);
   fput_aliases_definition_styled (c, stream);
@@ -2281,23 +2502,23 @@ deprecated_cmd_warning (const char *text, struct cmd_list_element *list)
       tmp_alias_str += std::string (alias->name);
 
       if (cmd->cmd_deprecated)
-	printf_filtered (_("Warning: command '%ps' (%ps) is deprecated.\n"),
-			 styled_string (title_style.style (),
-					tmp_cmd_str.c_str ()),
-			 styled_string (title_style.style (),
-					tmp_alias_str.c_str ()));
+	gdb_printf (_("Warning: command '%ps' (%ps) is deprecated.\n"),
+		    styled_string (title_style.style (),
+				   tmp_cmd_str.c_str ()),
+		    styled_string (title_style.style (),
+				   tmp_alias_str.c_str ()));
       else
-	printf_filtered (_("Warning: '%ps', an alias for the command '%ps', "
-			   "is deprecated.\n"),
-			 styled_string (title_style.style (),
-					tmp_alias_str.c_str ()),
-			 styled_string (title_style.style (),
-					tmp_cmd_str.c_str ()));
+	gdb_printf (_("Warning: '%ps', an alias for the command '%ps', "
+		      "is deprecated.\n"),
+		    styled_string (title_style.style (),
+				   tmp_alias_str.c_str ()),
+		    styled_string (title_style.style (),
+				   tmp_cmd_str.c_str ()));
     }
   else
-    printf_filtered (_("Warning: command '%ps' is deprecated.\n"),
-		     styled_string (title_style.style (),
-				    tmp_cmd_str.c_str ()));
+    gdb_printf (_("Warning: command '%ps' is deprecated.\n"),
+		styled_string (title_style.style (),
+			       tmp_cmd_str.c_str ()));
 
   /* Now display a second line indicating what the user should use instead.
      If it is only the alias that is deprecated, we want to indicate the
@@ -2308,11 +2529,11 @@ deprecated_cmd_warning (const char *text, struct cmd_list_element *list)
   else
     replacement = cmd->replacement;
   if (replacement != nullptr)
-    printf_filtered (_("Use '%ps'.\n\n"),
-		     styled_string (title_style.style (),
-				    replacement));
+    gdb_printf (_("Use '%ps'.\n\n"),
+		styled_string (title_style.style (),
+			       replacement));
   else
-    printf_filtered (_("No alternative known.\n\n"));
+    gdb_printf (_("No alternative known.\n\n"));
 
   /* We've warned you, now we'll keep quiet.  */
   if (alias != nullptr)

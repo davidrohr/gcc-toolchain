@@ -1,6 +1,6 @@
 /* DWARF DWZ handling for GDB.
 
-   Copyright (C) 2003-2022 Free Software Foundation, Inc.
+   Copyright (C) 2003-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -90,6 +90,11 @@ locate_dwz_sections (bfd *abfd, asection *sectp, dwz_file *dwz_file)
     {
       dwz_file->debug_names.s.section = sectp;
       dwz_file->debug_names.size = bfd_section_size (sectp);
+    }
+  else if (dwarf2_elf_names.types.matches (sectp->name))
+    {
+      dwz_file->types.s.section = sectp;
+      dwz_file->types.size = bfd_section_size (sectp);
     }
 }
 

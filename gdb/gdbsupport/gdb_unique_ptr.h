@@ -1,6 +1,6 @@
 /* std::unique_ptr specializations for GDB.
 
-   Copyright (C) 2016-2022 Free Software Foundation, Inc.
+   Copyright (C) 2016-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -55,6 +55,19 @@ struct noop_deleter
 {
   void operator() (T *ptr) const { }
 };
+
+/* Create simple std::unique_ptr<T> objects.  */
+
+template<typename T, typename... Arg>
+std::unique_ptr<T>
+make_unique (Arg &&...args)
+{
+#if __cplusplus >= 201402L
+  return std::make_unique<T> (std::forward<Arg> (args)...);
+#else
+  return std::unique_ptr<T> (new T (std::forward<Arg> (args)...));
+#endif /* __cplusplus < 201402L */
+}
 
 } /* namespace gdb */
 

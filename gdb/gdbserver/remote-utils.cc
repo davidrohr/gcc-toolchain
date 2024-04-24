@@ -1,5 +1,5 @@
 /* Remote utility routines for the remote server for GDB.
-   Copyright (C) 1986-2022 Free Software Foundation, Inc.
+   Copyright (C) 1986-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -296,8 +296,7 @@ remote_prepare (const char *name)
       ((struct sockaddr_in6 *) iter->ai_addr)->sin6_addr = in6addr_any;
       break;
     default:
-      internal_error (__FILE__, __LINE__,
-		      _("Invalid 'ai_family' %d\n"), iter->ai_family);
+      internal_error (_("Invalid 'ai_family' %d\n"), iter->ai_family);
     }
 
   if (bind (listen_desc, iter->ai_addr, iter->ai_addrlen) != 0)
@@ -1054,8 +1053,9 @@ void
 prepare_resume_reply (char *buf, ptid_t ptid, const target_waitstatus &status)
 {
   client_state &cs = get_client_state ();
-  threads_debug_printf ("Writing resume reply for %s:%d",
-			target_pid_to_str (ptid).c_str (), status.kind ());
+  threads_debug_printf ("Writing resume reply for %s: %s",
+			target_pid_to_str (ptid).c_str (),
+			status.to_string ().c_str ());
 
   switch (status.kind ())
     {
@@ -1068,8 +1068,8 @@ prepare_resume_reply (char *buf, ptid_t ptid, const target_waitstatus &status)
     case TARGET_WAITKIND_SYSCALL_ENTRY:
     case TARGET_WAITKIND_SYSCALL_RETURN:
       {
-	const char **regp;
 	struct regcache *regcache;
+	char *buf_start = buf;
 
 	if ((status.kind () == TARGET_WAITKIND_FORKED && cs.report_fork_events)
 	    || (status.kind () == TARGET_WAITKIND_VFORKED
@@ -1140,11 +1140,11 @@ prepare_resume_reply (char *buf, ptid_t ptid, const target_waitstatus &status)
 	       An 'S' stop packet always looks like 'Sxx', so all we do
 	       here is convert the buffer from a T packet to an S packet
 	       and the avoid adding any extra content by breaking out.  */
-	    gdb_assert (*buf == 'T');
-	    gdb_assert (isxdigit (*(buf + 1)));
-	    gdb_assert (isxdigit (*(buf + 2)));
-	    *buf = 'S';
-	    *(buf + 3) = '\0';
+	    gdb_assert (buf_start[0] == 'T');
+	    gdb_assert (isxdigit (buf_start[1]));
+	    gdb_assert (isxdigit (buf_start[2]));
+	    buf_start[0] = 'S';
+	    buf_start[3] = '\0';
 	    break;
 	  }
 
@@ -1153,8 +1153,6 @@ prepare_resume_reply (char *buf, ptid_t ptid, const target_waitstatus &status)
 	scoped_restore_current_thread restore_thread;
 
 	switch_to_thread (the_target, ptid);
-
-	regp = current_target_desc ()->expedite_regs;
 
 	regcache = get_thread_regcache (current_thread, 1);
 
@@ -1187,18 +1185,18 @@ prepare_resume_reply (char *buf, ptid_t ptid, const target_waitstatus &status)
 	    buf += strlen (buf);
 	  }
 
-	while (*regp)
-	  {
-	    buf = outreg (regcache, find_regno (regcache->tdesc, *regp), buf);
-	    regp ++;
-	  }
+	/* Handle the expedited registers.  */
+	for (const std::string &expedited_reg :
+	     current_target_desc ()->expedite_regs)
+	  buf = outreg (regcache, find_regno (regcache->tdesc,
+					      expedited_reg.c_str ()), buf);
 	*buf = '\0';
 
 	/* Formerly, if the debugger had not used any thread features
 	   we would not burden it with a thread status response.  This
 	   was for the benefit of GDB 4.13 and older.  However, in
 	   recent GDB versions the check (``if (cont_thread != 0)'')
-	   does not have the desired effect because of sillyness in
+	   does not have the desired effect because of silliness in
 	   the way that the remote protocol handles specifying a
 	   thread.  Since thread support relies on qSymbol support
 	   anyway, assume GDB can handle threads.  */

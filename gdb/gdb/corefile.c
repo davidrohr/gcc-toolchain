@@ -1,6 +1,6 @@
 /* Core dump and executable file functions above target vector, for GDB.
 
-   Copyright (C) 1986-2022 Free Software Foundation, Inc.
+   Copyright (C) 1986-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -33,6 +33,7 @@
 #include "observable.h"
 #include "cli/cli-utils.h"
 #include "gdbarch.h"
+#include "interps.h"
 
 /* You can have any number of hooks for `exec_file_command' command to
    call.  If there's only one hook, it is set in exec_file_display
@@ -173,8 +174,7 @@ memory_error_message (enum target_xfer_status err,
       return string_printf (_("Memory at address %s unavailable."),
 			    paddress (gdbarch, memaddr));
     default:
-      internal_error (__FILE__, __LINE__,
-		      "unhandled target_xfer_status: %s (%s)",
+      internal_error ("unhandled target_xfer_status: %s (%s)",
 		      target_xfer_status_to_string (err),
 		      plongest (err));
     }
@@ -335,9 +335,9 @@ read_code_unsigned_integer (CORE_ADDR memaddr, int len,
 CORE_ADDR
 read_memory_typed_address (CORE_ADDR addr, struct type *type)
 {
-  gdb_byte *buf = (gdb_byte *) alloca (TYPE_LENGTH (type));
+  gdb_byte *buf = (gdb_byte *) alloca (type->length ());
 
-  read_memory (addr, buf, TYPE_LENGTH (type));
+  read_memory (addr, buf, type->length ());
   return extract_typed_address (buf, type);
 }
 
@@ -354,6 +354,16 @@ write_memory (CORE_ADDR memaddr,
     memory_error (TARGET_XFER_E_IO, memaddr);
 }
 
+/* Notify interpreters and observers that INF's memory was changed.  */
+
+static void
+notify_memory_changed (inferior *inf, CORE_ADDR addr, ssize_t len,
+		       const bfd_byte *data)
+{
+  interps_notify_memory_changed (inf, addr, len, data);
+  gdb::observers::memory_changed.notify (inf, addr, len, data);
+}
+
 /* Same as write_memory, but notify 'memory_changed' observers.  */
 
 void
@@ -361,7 +371,7 @@ write_memory_with_notification (CORE_ADDR memaddr, const bfd_byte *myaddr,
 				ssize_t len)
 {
   write_memory (memaddr, myaddr, len);
-  gdb::observers::memory_changed.notify (current_inferior (), memaddr, len, myaddr);
+  notify_memory_changed (current_inferior (), memaddr, len, myaddr);
 }
 
 /* Store VALUE at ADDR in the inferior as a LEN-byte unsigned
@@ -401,8 +411,8 @@ show_gnutarget_string (struct ui_file *file, int from_tty,
 		       struct cmd_list_element *c,
 		       const char *value)
 {
-  fprintf_filtered (file,
-		    _("The current BFD target is \"%s\".\n"), value);
+  gdb_printf (file,
+	      _("The current BFD target is \"%s\".\n"), value);
 }
 
 static void

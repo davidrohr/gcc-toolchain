@@ -1,6 +1,6 @@
 /* Target-dependent code for FreeBSD/i386.
 
-   Copyright (C) 2003-2022 Free Software Foundation, Inc.
+   Copyright (C) 2003-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -18,13 +18,13 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
 
 #include "defs.h"
+#include "gdbcore.h"
 #include "osabi.h"
 #include "regcache.h"
 #include "regset.h"
 #include "trad-frame.h"
 #include "tramp-frame.h"
 #include "i386-fbsd-tdep.h"
-#include "gdbsupport/x86-xstate.h"
 
 #include "i386-tdep.h"
 #include "i387-tdep.h"
@@ -34,6 +34,9 @@
 
 /* The general-purpose regset consists of 19 32-bit slots.  */
 #define I386_FBSD_SIZEOF_GREGSET	(19 * 4)
+
+/* The segment base register set consists of 2 32-bit registers.  */
+#define I386_FBSD_SIZEOF_SEGBASES_REGSET	(2 * 4)
 
 /* Register maps.  */
 
@@ -58,6 +61,13 @@ static const struct regcache_map_entry i386_fbsd_gregmap[] =
   { 1, I386_ESP_REGNUM, 0 },
   { 1, I386_SS_REGNUM, 4 },
   { 1, I386_GS_REGNUM, 4 },
+  { 0 }
+};
+
+static const struct regcache_map_entry i386_fbsd_segbases_regmap[] =
+{
+  { 1, I386_FSBASE_REGNUM, 0 },
+  { 1, I386_GSBASE_REGNUM, 0 },
   { 0 }
 };
 
@@ -103,6 +113,11 @@ const struct regset i386_fbsd_gregset =
   i386_fbsd_gregmap, regcache_supply_regset, regcache_collect_regset
 };
 
+const struct regset i386_fbsd_segbases_regset =
+{
+  i386_fbsd_segbases_regmap, regcache_supply_regset, regcache_collect_regset
+};
+
 /* Support for signal handlers.  */
 
 /* In a signal frame, esp points to a 'struct sigframe' which is
@@ -118,7 +133,7 @@ const struct regset i386_fbsd_gregset =
 		__sighandler_t		*sf_handler;
 	} sf_ahu;
 	ucontext_t	sf_uc;
-        ...
+	...
    }
 
    ucontext_t is defined as:
@@ -141,7 +156,7 @@ const struct regset i386_fbsd_gregset =
 
 static void
 i386_fbsd_sigframe_init (const struct tramp_frame *self,
-			 struct frame_info *this_frame,
+			 frame_info_ptr this_frame,
 			 struct trad_frame_cache *this_cache,
 			 CORE_ADDR func)
 {
@@ -226,41 +241,44 @@ static const struct tramp_frame i386_fbsd64_sigframe =
   i386_fbsd_sigframe_init
 };
 
-/* Get XSAVE extended state xcr0 from core dump.  */
+/* See i386-fbsd-tdep.h.  */
 
 uint64_t
-i386fbsd_core_read_xcr0 (bfd *abfd)
+i386_fbsd_core_read_xsave_info (bfd *abfd, x86_xsave_layout &layout)
 {
   asection *xstate = bfd_get_section_by_name (abfd, ".reg-xstate");
-  uint64_t xcr0;
+  if (xstate == nullptr)
+    return 0;
 
-  if (xstate)
+  /* Check extended state size.  */
+  size_t size = bfd_section_size (xstate);
+  if (size < X86_XSTATE_AVX_SIZE)
+    return 0;
+
+  char contents[8];
+  if (! bfd_get_section_contents (abfd, xstate, contents,
+				  I386_FBSD_XSAVE_XCR0_OFFSET, 8))
     {
-      size_t size = bfd_section_size (xstate);
-
-      /* Check extended state size.  */
-      if (size < X86_XSTATE_AVX_SIZE)
-	xcr0 = X86_XSTATE_SSE_MASK;
-      else
-	{
-	  char contents[8];
-
-	  if (! bfd_get_section_contents (abfd, xstate, contents,
-					  I386_FBSD_XSAVE_XCR0_OFFSET,
-					  8))
-	    {
-	      warning (_("Couldn't read `xcr0' bytes from "
-			 "`.reg-xstate' section in core file."));
-	      return X86_XSTATE_SSE_MASK;
-	    }
-
-	  xcr0 = bfd_get_64 (abfd, contents);
-	}
+      warning (_("Couldn't read `xcr0' bytes from "
+		 "`.reg-xstate' section in core file."));
+      return 0;
     }
-  else
-    xcr0 = X86_XSTATE_SSE_MASK;
+
+  uint64_t xcr0 = bfd_get_64 (abfd, contents);
+
+  if (!i387_guess_xsave_layout (xcr0, size, layout))
+    return 0;
 
   return xcr0;
+}
+
+/* See i386-fbsd-tdep.h.  */
+
+bool
+i386_fbsd_core_read_x86_xsave_layout (struct gdbarch *gdbarch,
+				      x86_xsave_layout &layout)
+{
+  return i386_fbsd_core_read_xsave_info (core_bfd, layout) != 0;
 }
 
 /* Implement the core_read_description gdbarch method.  */
@@ -270,7 +288,11 @@ i386fbsd_core_read_description (struct gdbarch *gdbarch,
 				struct target_ops *target,
 				bfd *abfd)
 {
-  return i386_target_description (i386fbsd_core_read_xcr0 (abfd), true);
+  x86_xsave_layout layout;
+  uint64_t xcr0 = i386_fbsd_core_read_xsave_info (abfd, layout);
+  if (xcr0 == 0)
+    xcr0 = X86_XSTATE_X87_MASK;
+  return i386_target_description (xcr0, true);
 }
 
 /* Similar to i386_supply_fpregset, but use XSAVE extended state.  */
@@ -310,16 +332,19 @@ i386fbsd_iterate_over_regset_sections (struct gdbarch *gdbarch,
 				       void *cb_data,
 				       const struct regcache *regcache)
 {
-  i386_gdbarch_tdep *tdep = (i386_gdbarch_tdep *) gdbarch_tdep (gdbarch);
+  i386_gdbarch_tdep *tdep = gdbarch_tdep<i386_gdbarch_tdep> (gdbarch);
 
   cb (".reg", I386_FBSD_SIZEOF_GREGSET, I386_FBSD_SIZEOF_GREGSET,
       &i386_fbsd_gregset, NULL, cb_data);
   cb (".reg2", tdep->sizeof_fpregset, tdep->sizeof_fpregset, &i386_fpregset,
       NULL, cb_data);
+  cb (".reg-x86-segbases", I386_FBSD_SIZEOF_SEGBASES_REGSET,
+      I386_FBSD_SIZEOF_SEGBASES_REGSET, &i386_fbsd_segbases_regset,
+      "segment bases", cb_data);
 
-  if (tdep->xcr0 & X86_XSTATE_AVX)
-    cb (".reg-xstate", X86_XSTATE_SIZE (tdep->xcr0),
-	X86_XSTATE_SIZE (tdep->xcr0), &i386fbsd_xstateregset,
+  if (tdep->xsave_layout.sizeof_xsave != 0)
+    cb (".reg-xstate", tdep->xsave_layout.sizeof_xsave,
+	tdep->xsave_layout.sizeof_xsave, &i386fbsd_xstateregset,
 	"XSAVE extended state", cb_data);
 }
 
@@ -329,19 +354,15 @@ static CORE_ADDR
 i386fbsd_get_thread_local_address (struct gdbarch *gdbarch, ptid_t ptid,
 				   CORE_ADDR lm_addr, CORE_ADDR offset)
 {
-  i386_gdbarch_tdep *tdep = (i386_gdbarch_tdep *) gdbarch_tdep (gdbarch);
   struct regcache *regcache;
-
-  if (tdep->fsbase_regnum == -1)
-    error (_("Unable to fetch %%gsbase"));
 
   regcache = get_thread_arch_regcache (current_inferior ()->process_target (),
 				       ptid, gdbarch);
 
-  target_fetch_registers (regcache, tdep->fsbase_regnum + 1);
+  target_fetch_registers (regcache, I386_GSBASE_REGNUM);
 
   ULONGEST gsbase;
-  if (regcache->cooked_read (tdep->fsbase_regnum + 1, &gsbase) != REG_VALID)
+  if (regcache->cooked_read (I386_GSBASE_REGNUM, &gsbase) != REG_VALID)
     error (_("Unable to fetch %%gsbase"));
 
   CORE_ADDR dtv_addr = gsbase + gdbarch_ptr_bit (gdbarch) / 8;
@@ -351,7 +372,7 @@ i386fbsd_get_thread_local_address (struct gdbarch *gdbarch, ptid_t ptid,
 static void
 i386fbsd_init_abi (struct gdbarch_info info, struct gdbarch *gdbarch)
 {
-  i386_gdbarch_tdep *tdep = (i386_gdbarch_tdep *) gdbarch_tdep (gdbarch);
+  i386_gdbarch_tdep *tdep = gdbarch_tdep<i386_gdbarch_tdep> (gdbarch);
 
   /* Generic FreeBSD support. */
   fbsd_init_abi (info, gdbarch);
@@ -372,6 +393,8 @@ i386fbsd_init_abi (struct gdbarch_info info, struct gdbarch *gdbarch)
   i386_elf_init_abi (info, gdbarch);
 
   tdep->xsave_xcr0_offset = I386_FBSD_XSAVE_XCR0_OFFSET;
+  set_gdbarch_core_read_x86_xsave_layout
+    (gdbarch, i386_fbsd_core_read_x86_xsave_layout);
 
   /* Iterate over core file register note sections.  */
   set_gdbarch_iterate_over_regset_sections

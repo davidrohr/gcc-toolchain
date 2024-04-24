@@ -1,6 +1,6 @@
 /* Scheme interface to architecture.
 
-   Copyright (C) 2014-2022 Free Software Foundation, Inc.
+   Copyright (C) 2014-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -25,7 +25,7 @@
 #include "disasm.h"
 #include "dis-asm.h"
 #include "gdbarch.h"
-#include "gdbcore.h" /* Why is memory_error here? */
+#include "gdbcore.h"
 #include "guile-internal.h"
 
 static SCM port_keyword;
@@ -106,7 +106,7 @@ gdbscm_disasm_read_memory_worker (void *datap)
 static int
 gdbscm_disasm_read_memory (bfd_vma memaddr, bfd_byte *myaddr,
 			   unsigned int length,
-			   struct disassemble_info *dinfo)
+			   struct disassemble_info *dinfo) noexcept
 {
   gdbscm_disassembler *self
     = static_cast<gdbscm_disassembler *> (dinfo->application_data);

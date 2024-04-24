@@ -1,4 +1,4 @@
-# Copyright (C) 2012-2022 Free Software Foundation, Inc.
+# Copyright (C) 2012-2024 Free Software Foundation, Inc.
 
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -67,14 +67,14 @@ if {    ![istarget alpha*-*-*vms*]
      && ![istarget ft32-*-*]
      && ![istarget hppa*-*-*]
      && ![istarget microblaze-*-*]
+     && ![istarget loongarch*-*-*]
      && ![istarget mn10300-*-*]
      && ![istarget msp430*-*-*]
      && ![istarget powerpc*-*-aix*]
      && ![istarget riscv*-*-*]
      && ![istarget rl78-*-*]
      && ![istarget rs6000*-*-aix*]
-     && ![istarget rx-*-*]
-     && ![istarget loongarch*-*-*] } then {
+     && ![istarget rx-*-*] } then {
     gas_test_error "diff1.s" "" "difference of two undefined symbols"
 }
 
@@ -165,12 +165,12 @@ switch -glob $target_triplet {
 	# These targets fail redef2 because they disallow redefined
 	# symbols on relocs.
 	setup_xfail "m68hc1*-*-*" "m6811-*-*" "m6812-*-*" "rl78-*-*"
-	setup_xfail "riscv*-*-*" "rx-*-*" "vax*-*-*" "xgate*-*-*" "z8k-*-*"
-	setup_xfail "loongarch*-*-*" "avr-*-*"
+	setup_xfail "loongarch*-*-*" "riscv*-*-*" "rx-*-*" "vax*-*-*" "xgate*-*-*" "z8k-*-*"
+	setup_xfail "avr-*-*"
 	run_dump_test redef2
 	setup_xfail "m68hc1*-*-*" "m6811-*-*" "m6812-*-*" "rl78-*-*"
-	setup_xfail "riscv*-*-*" "rx-*-*" "vax*-*-*" "xgate*-*-*" "z8k-*-*"
-	setup_xfail "loongarch*-*-*" "avr-*-*"
+	setup_xfail "loongarch*-*-*" "riscv*-*-*" "rx-*-*" "vax*-*-*" "xgate*-*-*" "z8k-*-*"
+	setup_xfail "avr-*-*"
 	# rs6000-aix disallows redefinition via .comm.
 	if [is_xcoff_format] {
 	    setup_xfail *-*-*
@@ -278,10 +278,8 @@ if {    ![istarget *c30*-*-*]
      && ![istarget ft32-*-*]
      && ![istarget h8300*-*-*]
      && ![istarget hppa*-*-*] } then {
-    # The vax fails because VMS can apparently actually handle this
-    # case in relocs, so gas doesn't handle it itself.
     # msp430, mn10[23]00 and riscv emit two relocs to handle the difference of two symbols.
-    setup_xfail "am3*-*-*" "mn10200-*-*" "mn10300*-*-*" "msp430*-*-*" "riscv*-*-*" "vax*-*-vms*"
+    setup_xfail "am3*-*-*" "loongarch*-*-*" "mn10200-*-*" "mn10300*-*-*" "msp430*-*-*" "riscv*-*-*"
     do_930509a
 }
 
@@ -323,11 +321,9 @@ switch -glob $target_triplet {
 # We omit the ARM toolchains because they define locals to
 #  start with '.', which eliminates .eos, .text etc from the output.
 # Omit c54x, since .tag and .def mean something different on that target
-if {   ([istarget *-*-coff*] && ![istarget arm*-*-coff] && ![istarget *c4x*-*-coff] && ![istarget *c54x*-*-coff]) \
+if {   ([istarget *-*-coff*] && ![istarget *c4x*-*-coff] && ![istarget *c54x*-*-coff]) \
      ||([istarget *-*-pe*] && ![istarget arm*-*-pe*]) \
      || [istarget i*86-*-aix*] \
-     || [istarget i*86-*-sco*] \
-     || [istarget i*86-*-isc*] \
      || [istarget i*86-*-go32*] \
      || [istarget i*86-*-cygwin*] \
      || [istarget x86_64-*-mingw*] \
@@ -431,6 +427,11 @@ if { ![istarget "tic4x*-*-*"] && ![istarget "tic54x*-*-*"] && ![istarget "hppa*-
 
 run_dump_test quad
 
+# ~ isn't an operator on PDP-11
+if { ![istarget "pdp11-*-*"] } {
+    run_dump_test quad2
+}
+
 # poor little PDP-11 can't handle 16-byte values
 if { ![istarget "pdp11-*-*"] } {
     run_dump_test octa
@@ -467,6 +468,11 @@ setup_xfail "tic30-*-*"
 run_list_test cond-2 "-al"
 setup_xfail "tic30-*-*"
 run_list_test linefile ""
+
+# Again, .byte does not emit 8 bits on either tic4x or tic54x.
+if { ![istarget "tic4x*-*-*"] && ![istarget "tic54x*-*-*"] } {
+    run_list_test const-1 "-alm"
+}
 
 run_list_test macro "-alm"
 

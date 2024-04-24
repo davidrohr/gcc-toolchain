@@ -1,5 +1,5 @@
 dnl Autoconf configure script for GDB, the GNU debugger.
-dnl Copyright (C) 1995-2022 Free Software Foundation, Inc.
+dnl Copyright (C) 1995-2023 Free Software Foundation, Inc.
 dnl
 dnl This file is part of GDB.
 dnl
@@ -19,7 +19,7 @@ dnl along with this program.  If not, see <http://www.gnu.org/licenses/>.
 dnl Process this file with autoconf to produce a configure script.
 
 AC_INIT
-AC_CONFIG_MACRO_DIRS([../config])
+AC_CONFIG_MACRO_DIRS([.. ../config])
 AC_CONFIG_SRCDIR([main.c])
 AC_CONFIG_HEADERS(config.h:config.in, [echo > stamp-h])
 AM_MAINTAINER_MODE
@@ -46,6 +46,13 @@ ACX_NONCANONICAL_TARGET
 
 AC_ARG_PROGRAM
 
+# We require libtool to link with the in-tree libtool libraries
+# the proper way.
+LT_INIT
+# ... and we need it soon, since it is used by some of the
+# link tests in the configure script.
+LT_OUTPUT
+
 # We require a C++11 compiler.  Check if one is available, and if
 # necessary, set CXX_DIALECT to some -std=xxx switch.
 AX_CXX_COMPILE_STDCXX(11, , mandatory)
@@ -53,6 +60,11 @@ AX_CXX_COMPILE_STDCXX(11, , mandatory)
 # Dependency checking.
 ZW_CREATE_DEPDIR
 ZW_PROG_COMPILER_DEPENDENCIES([CC])
+
+# Since the first call to PKG_CHECK_MODULES may not happen (is guarded by
+# a condition), we must call PKG_PROG_PKG_CONFIG explicitly to probe for
+# pkg-config.
+PKG_PROG_PKG_CONFIG
 
 dnl List of object files and targets accumulated by configure.
 
@@ -106,6 +118,14 @@ AC_SUBST(MAKEINFO_EXTRA_FLAGS)
 GDB_AC_WITH_DIR(DEBUGDIR, separate-debug-dir,
     [look for global separate debug info in this path @<:@LIBDIR/debug@:>@],
     [${libdir}/debug])
+
+AC_ARG_WITH(additional-debug-dirs,
+	    AS_HELP_STRING([--with-additional-debug-dirs=PATHs],
+			   [colon-separated list of additional directories to
+			    search for separate debug info]),
+	    [AC_DEFINE_UNQUOTED(ADDITIONAL_DEBUG_DIRS, "${withval}",
+				Additional directories to look for separate
+				debug info.)])
 
 # We can't pass paths as command line arguments.
 # Mingw32 tries to be clever and will convert the paths for us.
@@ -234,6 +254,54 @@ if test x${all_targets} = xtrue; then
   fi
 fi
 
+# AMD debugger API support.
+
+AC_ARG_WITH([amd-dbgapi],
+	    [AS_HELP_STRING([--with-amd-dbgapi],
+			    [support for the amd-dbgapi target (yes / no / auto)])],
+	    [GDB_CHECK_YES_NO_AUTO_VAL([$withval], [--with-amd-dbgapi])],
+	    [with_amd_dbgapi=auto])
+
+# If the user passes --without-amd-dbgapi but also explicitly enables a target
+# that requires amd-dbgapi, it is an error.
+if test "$with_amd_dbgapi" = no -a "$gdb_require_amd_dbgapi" = true; then
+  AC_MSG_ERROR([an explicitly enabled target requires amd-dbgapi, but amd-dbgapi is explicitly disabled])
+fi
+
+# Look for amd-dbgapi if:
+#
+#   - a target architecture requiring it has explicitly been enabled, or
+#   - --enable-targets=all was provided and the user did not explicitly disable
+#     amd-dbgapi support
+if test "$gdb_require_amd_dbgapi" = true \
+     -o \( "$all_targets" = true -a "$with_amd_dbgapi" != no \); then
+  # amd-dbgapi version 0.68 is part of ROCm 5.4.  There is no guarantee of API
+  # stability until amd-dbgapi hits 1.0, but for convenience, still check for
+  # greater or equal that version.  It can be handy when testing with a newer
+  # version of the library.
+  PKG_CHECK_MODULES([AMD_DBGAPI], [amd-dbgapi >= 0.68.0],
+		    [has_amd_dbgapi=yes], [has_amd_dbgapi=no])
+
+  if test "$has_amd_dbgapi" = "yes"; then
+    AC_DEFINE(HAVE_AMD_DBGAPI, 1, [Define if amd-dbgapi is being linked in.])
+    TARGET_OBS="$TARGET_OBS amd-dbgapi-target.o"
+
+    # If --enable-targets=all was provided, use the list of all files depending
+    # on amd-dbgapi that is hardcoded in the Makefile.  Else, the appropriate
+    # architecture entry in configure.tgt will have added the files to
+    # gdb_target_obs.
+    if test "$all_targets" = true; then
+      TARGET_OBS="$TARGET_OBS \$(ALL_AMD_DBGAPI_TARGET_OBS)"
+    fi
+  elif test "$gdb_require_amd_dbgapi" = true -o "$with_amd_dbgapi" = yes; then
+    # amd-dbgapi was not found and...
+    #
+    #   - a target requiring it was explicitly enabled, or
+    #   - the user explicitly wants to enable amd-dbgapi
+    AC_MSG_ERROR([amd-dbgapi is required, but cannot find an appropriate version: $AMD_DBGAPI_PKG_ERRORS])
+  fi
+fi
+
 AC_SUBST(TARGET_OBS)
 AC_SUBST(HAVE_NATIVE_GCORE_TARGET)
 
@@ -258,49 +326,22 @@ if test "x$targ_defvec" != x; then
     [Define to BFD's default target vector. ])
 fi
 
-# Enable MI.
-AC_ARG_ENABLE(gdbmi,
-AS_HELP_STRING([--disable-gdbmi], [disable machine-interface (MI)]),
-  [case $enableval in
-    yes | no)
-      ;;
-    *)
-      AC_MSG_ERROR([bad value $enableval for --enable-gdbmi]) ;;
-  esac],
-  [enable_gdbmi=yes])
-if test x"$enable_gdbmi" = xyes; then
-  if test -d "$srcdir/mi"; then
-    CONFIG_OBS="$CONFIG_OBS \$(SUBDIR_MI_OBS)"
-    CONFIG_DEPS="$CONFIG_DEPS \$(SUBDIR_MI_DEPS)"
-    CONFIG_SRCS="$CONFIG_SRCS \$(SUBDIR_MI_SRCS)"
-    ENABLE_CFLAGS="$ENABLE_CFLAGS \$(SUBDIR_MI_CFLAGS)"
-  fi
-fi
-
 # Enable TUI.
 AC_ARG_ENABLE(tui,
-AS_HELP_STRING([--enable-tui], [enable full-screen terminal user interface (TUI)]),
-  [case $enableval in
-    yes | no | auto)
-      ;;
-    *)
-      AC_MSG_ERROR([bad value $enableval for --enable-tui]) ;;
-  esac],enable_tui=auto)
+AS_HELP_STRING([--enable-tui],
+	       [enable full-screen terminal user interface (TUI)]),
+	       [GDB_CHECK_YES_NO_AUTO_VAL([$enableval], [--enable-tui])],
+	       [enable_tui=auto])
 
 # Enable gdbtk.
-AC_ARG_ENABLE(gdbtk,
-AS_HELP_STRING([--enable-gdbtk], [enable gdbtk graphical user interface (GUI)]),
-  [case $enableval in
-    yes | no)
-      ;;
-    *)
-      AC_MSG_ERROR([bad value $enableval for --enable-gdbtk]) ;;
-  esac],
-  [if test -d "$srcdir/gdbtk"; then
-    enable_gdbtk=yes
-  else
-    enable_gdbtk=no
-  fi])
+AC_ARG_ENABLE([gdbtk],
+	      [AS_HELP_STRING([--enable-gdbtk], [enable gdbtk graphical user interface (GUI)])],
+	      [GDB_CHECK_YES_NO_VAL([$enableval], [--enable-gdbtk])],
+	      [if test -d "$srcdir/gdbtk"; then
+		 enable_gdbtk=yes
+	       else
+		 enable_gdbtk=no
+	       fi])
 # We unconditionally disable gdbtk tests on selected platforms.
 case $host_os in
   go32* | windows*)
@@ -359,15 +400,10 @@ if test "$opt_curses" = "yes"; then
 fi
 
 # Profiling support.
-AC_ARG_ENABLE(profiling,
-AS_HELP_STRING([--enable-profiling], [enable profiling of GDB]),
-  [case $enableval in
-    yes | no)
-      ;;
-    *)
-      AC_MSG_ERROR([bad value $enableval for --enable-profile]) ;;
-  esac],
- [enable_profiling=no])
+AC_ARG_ENABLE([profiling],
+	      [AS_HELP_STRING([--enable-profiling], [enable profiling of GDB])],
+	      [GDB_CHECK_YES_NO_VAL([$enableval], [--enable-profiling])],
+	      [enable_profiling=no])
 
 AC_CHECK_FUNCS(monstartup _mcleanup)
 AC_CACHE_CHECK(
@@ -475,11 +511,10 @@ AC_CHECK_LIB(m, main)
 # Some systems (e.g. Solaris) have `gethostbyname' in libnsl.
 AC_SEARCH_LIBS(gethostbyname, nsl)
 
-# Some systems (e.g. Solaris) have `socketpair' in libsocket.
-AC_SEARCH_LIBS(socketpair, socket)
-
-# Link in zlib if we can.  This allows us to read compressed debug sections.
+# Link in zlib/zstd if we can.  This allows us to read compressed debug
+# sections.
 AM_ZLIB
+AC_ZSTD
 
 AM_ICONV
 
@@ -520,28 +555,26 @@ if test x"$prefer_curses" = xyes; then
   # search /usr/local/include, if ncurses is installed in /usr/local.  A
   # default installation of ncurses on alpha*-dec-osf* will lead to such
   # a situation.
-  AC_SEARCH_LIBS(waddstr, [ncursesw ncurses cursesX curses])
-
-  if test "$ac_cv_search_waddstr" != no; then
-    curses_found=yes
-  fi
+  AC_SEARCH_LIBS(waddstr, [ncursesw ncurses cursesX curses],
+                 [curses_found=yes
+                  AC_DEFINE([HAVE_LIBCURSES], [1],
+                            [Define to 1 if curses is enabled.])
+                 ])
 fi
 
 # Check whether we should enable the TUI, but only do so if we really
 # can.
 if test x"$enable_tui" != xno; then
-  if test -d "$srcdir/tui"; then
-    if test "$curses_found" != no; then
-      CONFIG_OBS="$CONFIG_OBS \$(SUBDIR_TUI_OBS)"
-      CONFIG_DEPS="$CONFIG_DEPS \$(SUBDIR_TUI_DEPS)"
-      CONFIG_SRCS="$CONFIG_SRCS \$(SUBDIR_TUI_SRCS)"
-      ENABLE_CFLAGS="$ENABLE_CFLAGS \$(SUBDIR_TUI_CFLAGS)"
+  if test "$curses_found" != no; then
+    CONFIG_OBS="$CONFIG_OBS \$(SUBDIR_TUI_OBS)"
+    CONFIG_DEPS="$CONFIG_DEPS \$(SUBDIR_TUI_DEPS)"
+    CONFIG_SRCS="$CONFIG_SRCS \$(SUBDIR_TUI_SRCS)"
+    ENABLE_CFLAGS="$ENABLE_CFLAGS \$(SUBDIR_TUI_CFLAGS)"
+  else
+    if test x"$enable_tui" = xyes; then
+      AC_MSG_ERROR([no enhanced curses library found; disable TUI])
     else
-      if test x"$enable_tui" = xyes; then
-	AC_MSG_ERROR([no enhanced curses library found; disable TUI])
-      else
-	AC_MSG_WARN([no enhanced curses library found; disabling TUI])
-      fi
+      AC_MSG_WARN([no enhanced curses library found; disabling TUI])
     fi
   fi
 fi
@@ -600,16 +633,19 @@ if test "$with_system_readline" = yes; then
   READLINE_DEPS=
   READLINE_CFLAGS=
   READLINE_TEXI_INCFLAG=
+  READLINE_DOC_SOURCE_INCLUDES='$(READLINE_SYSTEM_DOC_INCLUDES)'
 else
   READLINE='$(READLINE_DIR)/libreadline.a'
   READLINE_DEPS='$(READLINE)'
   READLINE_CFLAGS='-I$(READLINE_SRC)/..'
   READLINE_TEXI_INCFLAG='-I $(READLINE_DIR)'
+  READLINE_DOC_SOURCE_INCLUDES='$(READLINE_INTREE_DOC_INCLUDES)'
 fi
 AC_SUBST(READLINE)
 AC_SUBST(READLINE_DEPS)
 AC_SUBST(READLINE_CFLAGS)
 AC_SUBST(READLINE_TEXI_INCFLAG)
+AC_SUBST(READLINE_DOC_SOURCE_INCLUDES)
 
 # Generate jit-reader.h
 
@@ -665,35 +701,8 @@ else
   fi
 fi
 
-# Verify that we have a usable GMP library.
-AC_LIB_HAVE_LINKFLAGS([gmp], [], [#include <gmp.h>],
-                      [mpz_t n;
-                       mpz_init (n);])
-if test "$HAVE_LIBGMP" != yes; then
-  AC_MSG_ERROR([GMP is missing or unusable])
-fi
-
-AC_ARG_WITH(mpfr,
-  AS_HELP_STRING([--with-mpfr], [include MPFR support (auto/yes/no)]),
-  [], [with_mpfr=auto])
-AC_MSG_CHECKING([whether to use MPFR])
-AC_MSG_RESULT([$with_mpfr])
-
-if test "${with_mpfr}" = no; then
-  AC_MSG_WARN([MPFR support disabled; some features may be unavailable.])
-  HAVE_LIBMPFR=no
-else
-  AC_LIB_HAVE_LINKFLAGS([mpfr], [gmp], [#include <mpfr.h>],
-			[mpfr_exp_t exp; mpfr_t x;
-			 mpfr_frexp (&exp, x, x, MPFR_RNDN);])
-  if test "$HAVE_LIBMPFR" != yes; then
-    if test "$with_mpfr" = yes; then
-      AC_MSG_ERROR([MPFR is missing or unusable])
-    else
-      AC_MSG_WARN([MPFR is missing or unusable; some features may be unavailable.])
-    fi
-  fi
-fi
+AC_ARG_VAR(GMPLIBS,[How to link GMP])
+AC_ARG_VAR(GMPINC,[How to find GMP include files])
 
 # --------------------- #
 # Check for libpython.  #
@@ -717,7 +726,12 @@ AC_DEFUN([AC_TRY_LIBPYTHON],
   LIBS="$new_LIBS $LIBS"
   found_usable_python=no
   AC_LINK_IFELSE([AC_LANG_PROGRAM([[#include "Python.h"]],
-                                 [[Py_Initialize ();]])],
+                                 [[
+				    #if PY_MAJOR_VERSION != 3
+				    # error "We only support Python 3"
+				    #endif
+				    Py_Initialize ();
+				 ]])],
                  [have_libpython_var=yes
                   found_usable_python=yes
                   PYTHON_CPPFLAGS=$new_CPPFLAGS
@@ -733,7 +747,6 @@ dnl no -   Don't include python support.
 dnl yes -  Include python support, error if it's missing.
 dnl        If we find python in $PATH, use it to fetch configure options,
 dnl        otherwise assume the compiler can find it with no help from us.
-dnl        Python 2.7 and 2.6 are tried in turn.
 dnl auto - Same as "yes", but if python is missing from the system,
 dnl        fall back to "no".
 dnl /path/to/python/exec-prefix -
@@ -742,7 +755,6 @@ dnl        If /path/to/python/exec-prefix/bin/python exists, use it to find
 dnl        the compilation parameters.  Otherwise use
 dnl        -I/path/to/python/exec-prefix/include,
 dnl        -L/path/to/python/exec-prefix/lib.
-dnl        Python 2.7 and 2.6 are tried in turn.
 dnl        NOTE: This case is historical.  It is what was done for 7.0/7.1
 dnl        but is deprecated.
 dnl /path/to/python/executable -
@@ -808,7 +820,8 @@ else
     case "${with_python}" in
     yes | auto)
       if test "${build}" = "${host}"; then
-        AC_PATH_PROG(python_prog_path, python, missing)
+        # Look first for 'python', then 'python3'.
+        AC_PATH_PROGS(python_prog_path, [python python3], missing)
         if test "${python_prog_path}" = missing; then
           python_prog=missing
         else
@@ -877,15 +890,6 @@ else
   if test "${have_python_config}" = yes; then
     AC_TRY_LIBPYTHON(have_libpython,
                      ${python_includes}, ${python_libs})
-  elif test "${have_python_config}" != failed; then
-    if test "${have_libpython}" = no; then
-      AC_TRY_LIBPYTHON(have_libpython,
-                       ${python_includes}, "-lpython2.7 ${python_libs}")
-    fi
-    if test "${have_libpython}" = no; then
-      AC_TRY_LIBPYTHON(have_libpython,
-                       ${python_includes}, "-lpython2.6 ${python_libs}")
-    fi
   fi
 
   if test "${have_libpython}" = no; then
@@ -1202,15 +1206,11 @@ AM_CONDITIONAL(HAVE_GUILE, test "${have_libguile}" != no)
 SRCHIGH_LIBS=
 SRCHIGH_CFLAGS=
 
-AC_ARG_ENABLE(source-highlight,
-  AS_HELP_STRING([--enable-source-highlight],
-    [enable source-highlight for source listings]),
-  [case "${enableval}" in
-  yes)  enable_source_highlight=yes ;;
-  no)   enable_source_highlight=no  ;;
-  *)    AC_MSG_ERROR(bad value ${enableval} for source-highlight option) ;;
-esac],
-[enable_source_highlight=auto])
+AC_ARG_ENABLE([source-highlight],
+	      [AS_HELP_STRING([--enable-source-highlight],
+			      [enable source-highlight for source listings])],
+	      [GDB_CHECK_YES_NO_AUTO_VAL([$enableval], [--enable-source-highlight])],
+	      [enable_source_highlight=auto])
 
 if test "${enable_source_highlight}" != "no"; then
   AC_MSG_CHECKING([for the source-highlight library])
@@ -1346,10 +1346,10 @@ AC_C_BIGENDIAN
 # ------------------------------ #
 
 AC_CHECK_FUNCS([getuid getgid \
-		pipe pread pread64 pwrite resize_term \
+		pread pread64 pwrite resize_term \
 		getpgid setsid \
-		sigaction sigsetmask socketpair \
-		ttrace wborder wresize setlocale iconvlist libiconvlist btowc \
+		sigsetmask \
+		ttrace wresize setlocale iconvlist libiconvlist btowc \
 		setrlimit getrlimit posix_madvise waitpid \
 		use_default_colors])
 AM_LANGINFO_CODESET
@@ -2050,7 +2050,6 @@ if test "${ignore_sim}" = "false"; then
   if test x"${gdb_sim}" != x ; then
     SIM="${gdb_sim}"
     SIM_OBS="remote-sim.o"
-    AC_DEFINE(WITH_SIM, 1, [Define if the simulator is being linked in.])
 
     # Some tdep code should only be compiled in when the ppc sim is
     # built.  PR sim/13418.
@@ -2111,18 +2110,14 @@ fi
 
 # Setup possible use of libbacktrace.
 AC_ARG_ENABLE([libbacktrace],
-[AS_HELP_STRING([--enable-libbacktrace],
-                [use libbacktrace to write a backtrace after a fatal signal.])],
-[case "${enableval}" in
-  yes)  enable_libbacktrace=yes ;;
-  no)   enable_libbacktrace=no  ;;
-  *)    AC_MSG_ERROR(bad value ${enableval} for --enable-libbacktrace option) ;;
-esac],
-enable_libbacktrace=yes)
+	      [AS_HELP_STRING([--enable-libbacktrace],
+			      [use libbacktrace to write a backtrace after a fatal signal.])],
+	      [GDB_CHECK_YES_NO_VAL([$enableval], [--enable-libbacktrace])],
+	      [enable_libbacktrace=yes])
 
-if test "${enable_libbacktrace}" == "yes"; then
+if test "${enable_libbacktrace}" = "yes"; then
   LIBBACKTRACE_INC="-I$srcdir/../libbacktrace/ -I../libbacktrace/"
-  LIBBACKTRACE_LIB=../libbacktrace/.libs/libbacktrace.a
+  LIBBACKTRACE_LIB=../libbacktrace/libbacktrace.la
   AC_DEFINE(HAVE_LIBBACKTRACE, 1, [Define if libbacktrace is being used.])
 else
   LIBBACKTRACE_INC=
@@ -2175,21 +2170,11 @@ else
   fi
 fi
 
-# Check for xxhash
-AC_ARG_WITH(xxhash,
-  AS_HELP_STRING([--with-xxhash], [use libxxhash for hashing (faster) (auto/yes/no)]),
-  [], [with_xxhash=auto])
-
 GCC_ENABLE([libctf], [yes], [], [Handle .ctf type-info sections])
-if test x${enable_static} = xno; then
-  LIBCTF="-Wl,--rpath,../libctf/.libs ../libctf/.libs/libctf.so"
-  CTF_DEPS="../libctf/.libs/libctf.so"
-else
-  LIBCTF="../libctf/.libs/libctf.a"
-  CTF_DEPS="$LIBCTF"
-fi
 if test "${enable_libctf}" = yes; then
   AC_DEFINE(ENABLE_LIBCTF, 1, [Handle .ctf type-info sections])
+  LIBCTF="../libctf/libctf.la"
+  CTF_DEPS="../libctf/libctf.la"
 else
   LIBCTF=
   CTF_DEPS=
@@ -2199,24 +2184,6 @@ AC_SUBST(CTF_DEPS)
 
 # If nativefile (NAT_FILE) is not set in configure.nat, we link to an
 # empty version.
-
-if test "x$with_xxhash" != "xno"; then
-  AC_LIB_HAVE_LINKFLAGS([xxhash], [],
-			[#include <xxhash.h>],
-			[XXH32("foo", 3, 0);
-			])
-  if test "$HAVE_LIBXXHASH" != yes; then
-    if test "$with_xxhash" = yes; then
-      AC_MSG_ERROR([xxhash is missing or unusable])
-    fi
-  fi
-  if test "x$with_xxhash" = "xauto"; then
-    with_xxhash="$HAVE_LIBXXHASH"
-  fi
-fi
-
-AC_MSG_CHECKING([whether to use xxhash])
-AC_MSG_RESULT([$with_xxhash])
 
 NM_H=
 rm -f nm.h

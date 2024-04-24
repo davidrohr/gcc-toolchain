@@ -1,5 +1,5 @@
 /* Main code for remote server for GDB.
-   Copyright (C) 1989-2022 Free Software Foundation, Inc.
+   Copyright (C) 1989-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -51,6 +51,11 @@
 #include "gdbsupport/scoped_restore.h"
 #include "gdbsupport/search.h"
 
+/* PBUFSIZ must also be at least as big as IPA_CMD_BUF_SIZE, because
+   the client state data is passed directly to some agent
+   functions.  */
+gdb_static_assert (PBUFSIZ >= IPA_CMD_BUF_SIZE);
+
 #define require_running_or_return(BUF)		\
   if (!target_running ())			\
     {						\
@@ -64,10 +69,6 @@
       write_enn (BUF);				\
       break;					\
     }
-
-/* String containing the current directory (what getwd would return).  */
-
-char *current_directory;
 
 /* The environment to pass to the inferior when creating it.  */
 
@@ -94,31 +95,31 @@ bool non_stop;
 static struct {
   /* Set the PROGRAM_PATH.  Here we adjust the path of the provided
      binary if needed.  */
-  void set (gdb::unique_xmalloc_ptr<char> &&path)
+  void set (const char *path)
   {
-    m_path = std::move (path);
+    m_path = path;
 
     /* Make sure we're using the absolute path of the inferior when
        creating it.  */
-    if (!contains_dir_separator (m_path.get ()))
+    if (!contains_dir_separator (m_path.c_str ()))
       {
 	int reg_file_errno;
 
 	/* Check if the file is in our CWD.  If it is, then we prefix
 	   its name with CURRENT_DIRECTORY.  Otherwise, we leave the
 	   name as-is because we'll try searching for it in $PATH.  */
-	if (is_regular_file (m_path.get (), &reg_file_errno))
-	  m_path = gdb_abspath (m_path.get ());
+	if (is_regular_file (m_path.c_str (), &reg_file_errno))
+	  m_path = gdb_abspath (m_path.c_str ());
       }
   }
 
   /* Return the PROGRAM_PATH.  */
-  char *get ()
-  { return m_path.get (); }
+  const char *get ()
+  { return m_path.empty () ? nullptr : m_path.c_str (); }
 
 private:
   /* The program name, adjusted if needed.  */
-  gdb::unique_xmalloc_ptr<char> m_path;
+  std::string m_path;
 } program_path;
 static std::vector<char *> program_args;
 static std::string wrapper_argv;
@@ -1071,19 +1072,12 @@ gdb_read_memory (CORE_ADDR memaddr, unsigned char *myaddr, int len)
       /* (assume no half-trace half-real blocks for now) */
     }
 
-  res = prepare_to_access_memory ();
-  if (res == 0)
-    {
-      if (set_desired_thread ())
-	res = read_inferior_memory (memaddr, myaddr, len);
-      else
-	res = 1;
-      done_accessing_memory ();
-
-      return res == 0 ? len : -1;
-    }
+  if (set_desired_process ())
+    res = read_inferior_memory (memaddr, myaddr, len);
   else
-    return -1;
+    res = 1;
+
+  return res == 0 ? len : -1;
 }
 
 /* Write trace frame or inferior memory.  Actually, writing to trace
@@ -1099,15 +1093,10 @@ gdb_write_memory (CORE_ADDR memaddr, const unsigned char *myaddr, int len)
     {
       int ret;
 
-      ret = prepare_to_access_memory ();
-      if (ret == 0)
-	{
-	  if (set_desired_thread ())
-	    ret = target_write_memory (memaddr, myaddr, len);
-	  else
-	    ret = EIO;
-	  done_accessing_memory ();
-	}
+      if (set_desired_process ())
+	ret = target_write_memory (memaddr, myaddr, len);
+      else
+	ret = EIO;
       return ret;
     }
 }
@@ -1459,7 +1448,8 @@ handle_qxfer_auxv (const char *annex,
   if (annex[0] != '\0' || current_thread == NULL)
     return -1;
 
-  return the_target->read_auxv (offset, readbuf, len);
+  return the_target->read_auxv (current_thread->id.pid (), offset, readbuf,
+				len);
 }
 
 /* Handle qXfer:exec-file:read.  */
@@ -1649,7 +1639,7 @@ handle_qxfer_statictrace (const char *annex,
    Emit the XML to describe the thread of INF.  */
 
 static void
-handle_qxfer_threads_worker (thread_info *thread, struct buffer *buffer)
+handle_qxfer_threads_worker (thread_info *thread, std::string *buffer)
 {
   ptid_t ptid = ptid_of (thread);
   char ptid_s[100];
@@ -1668,74 +1658,55 @@ handle_qxfer_threads_worker (thread_info *thread, struct buffer *buffer)
 
   write_ptid (ptid_s, ptid);
 
-  buffer_xml_printf (buffer, "<thread id=\"%s\"", ptid_s);
+  string_xml_appendf (*buffer, "<thread id=\"%s\"", ptid_s);
 
   if (core != -1)
     {
       sprintf (core_s, "%d", core);
-      buffer_xml_printf (buffer, " core=\"%s\"", core_s);
+      string_xml_appendf (*buffer, " core=\"%s\"", core_s);
     }
 
   if (name != NULL)
-    buffer_xml_printf (buffer, " name=\"%s\"", name);
+    string_xml_appendf (*buffer, " name=\"%s\"", name);
 
   if (handle_status)
     {
       char *handle_s = (char *) alloca (handle_len * 2 + 1);
       bin2hex (handle, handle_s, handle_len);
-      buffer_xml_printf (buffer, " handle=\"%s\"", handle_s);
+      string_xml_appendf (*buffer, " handle=\"%s\"", handle_s);
     }
 
-  buffer_xml_printf (buffer, "/>\n");
+  string_xml_appendf (*buffer, "/>\n");
 }
 
 /* Helper for handle_qxfer_threads.  Return true on success, false
    otherwise.  */
 
 static bool
-handle_qxfer_threads_proper (struct buffer *buffer)
+handle_qxfer_threads_proper (std::string *buffer)
 {
-  client_state &cs = get_client_state ();
+  *buffer += "<threads>\n";
 
-  scoped_restore_current_thread restore_thread;
-  scoped_restore save_current_general_thread
-    = make_scoped_restore (&cs.general_thread);
+  /* The target may need to access memory and registers (e.g. via
+     libthread_db) to fetch thread properties.  Even if don't need to
+     stop threads to access memory, we still will need to be able to
+     access registers, and other ptrace accesses like
+     PTRACE_GET_THREAD_AREA that require a paused thread.  Pause all
+     threads here, so that we pause each thread at most once for all
+     accesses.  */
+  if (non_stop)
+    target_pause_all (true);
 
-  buffer_grow_str (buffer, "<threads>\n");
-
-  process_info *error_proc = find_process ([&] (process_info *process)
+  for_each_thread ([&] (thread_info *thread)
     {
-      /* The target may need to access memory and registers (e.g. via
-	 libthread_db) to fetch thread properties.  Prepare for memory
-	 access here, so that we potentially pause threads just once
-	 for all accesses.  Note that even if someday we stop needing
-	 to pause threads to access memory, we will need to be able to
-	 access registers, or other ptrace accesses like
-	 PTRACE_GET_THREAD_AREA.  */
-
-      /* Need to switch to each process in turn, because
-	 prepare_to_access_memory prepares for an access in the
-	 current process pointed to by general_thread.  */
-      switch_to_process (process);
-      cs.general_thread = current_thread->id;
-
-      int res = prepare_to_access_memory ();
-      if (res == 0)
-	{
-	  for_each_thread (process->pid, [&] (thread_info *thread)
-	    {
-	      handle_qxfer_threads_worker (thread, buffer);
-	    });
-
-	  done_accessing_memory ();
-	  return false;
-	}
-      else
-	return true;
+      handle_qxfer_threads_worker (thread, buffer);
     });
 
-  buffer_grow_str0 (buffer, "</threads>\n");
-  return error_proc == nullptr;
+  if (non_stop)
+    target_unpause_all (true);
+
+  *buffer += "</threads>\n";
+  return true;
 }
 
 /* Handle qXfer:threads:read.  */
@@ -1745,8 +1716,7 @@ handle_qxfer_threads (const char *annex,
 		      gdb_byte *readbuf, const gdb_byte *writebuf,
 		      ULONGEST offset, LONGEST len)
 {
-  static char *result = 0;
-  static unsigned int result_length = 0;
+  static std::string result;
 
   if (writebuf != NULL)
     return -2;
@@ -1756,37 +1726,27 @@ handle_qxfer_threads (const char *annex,
 
   if (offset == 0)
     {
-      struct buffer buffer;
       /* When asked for data at offset 0, generate everything and store into
 	 'result'.  Successive reads will be served off 'result'.  */
-      if (result)
-	free (result);
+      result.clear ();
 
-      buffer_init (&buffer);
-
-      bool res = handle_qxfer_threads_proper (&buffer);
-
-      result = buffer_finish (&buffer);
-      result_length = strlen (result);
-      buffer_free (&buffer);
+      bool res = handle_qxfer_threads_proper (&result);
 
       if (!res)
 	return -1;
     }
 
-  if (offset >= result_length)
+  if (offset >= result.length ())
     {
       /* We're out of data.  */
-      free (result);
-      result = NULL;
-      result_length = 0;
+      result.clear ();
       return 0;
     }
 
-  if (len > result_length - offset)
-    len = result_length - offset;
+  if (len > result.length () - offset)
+    len = result.length () - offset;
 
-  memcpy (readbuf, result + offset, len);
+  memcpy (readbuf, result.c_str () + offset, len);
 
   return len;
 }
@@ -1799,8 +1759,7 @@ handle_qxfer_traceframe_info (const char *annex,
 			      ULONGEST offset, LONGEST len)
 {
   client_state &cs = get_client_state ();
-  static char *result = 0;
-  static unsigned int result_length = 0;
+  static std::string result;
 
   if (writebuf != NULL)
     return -2;
@@ -1810,35 +1769,25 @@ handle_qxfer_traceframe_info (const char *annex,
 
   if (offset == 0)
     {
-      struct buffer buffer;
-
       /* When asked for data at offset 0, generate everything and
 	 store into 'result'.  Successive reads will be served off
 	 'result'.  */
-      free (result);
+      result.clear ();
 
-      buffer_init (&buffer);
-
-      traceframe_read_info (cs.current_traceframe, &buffer);
-
-      result = buffer_finish (&buffer);
-      result_length = strlen (result);
-      buffer_free (&buffer);
+      traceframe_read_info (cs.current_traceframe, &result);
     }
 
-  if (offset >= result_length)
+  if (offset >= result.length ())
     {
       /* We're out of data.  */
-      free (result);
-      result = NULL;
-      result_length = 0;
+      result.clear ();
       return 0;
     }
 
-  if (len > result_length - offset)
-    len = result_length - offset;
+  if (len > result.length () - offset)
+    len = result.length () - offset;
 
-  memcpy (readbuf, result + offset, len);
+  memcpy (readbuf, result.c_str () + offset, len);
   return len;
 }
 
@@ -1865,7 +1814,7 @@ handle_qxfer_btrace (const char *annex,
 		     ULONGEST offset, LONGEST len)
 {
   client_state &cs = get_client_state ();
-  static struct buffer cache;
+  static std::string cache;
   struct thread_info *thread;
   enum btrace_read_type type;
   int result;
@@ -1907,13 +1856,13 @@ handle_qxfer_btrace (const char *annex,
 
   if (offset == 0)
     {
-      buffer_free (&cache);
+      cache.clear ();
 
       try
 	{
 	  result = target_read_btrace (thread->btrace, &cache, type);
 	  if (result != 0)
-	    memcpy (cs.own_buf, cache.buffer, cache.used_size);
+	    memcpy (cs.own_buf, cache.c_str (), cache.length ());
 	}
       catch (const gdb_exception_error &exception)
 	{
@@ -1924,16 +1873,16 @@ handle_qxfer_btrace (const char *annex,
       if (result != 0)
 	return -3;
     }
-  else if (offset > cache.used_size)
+  else if (offset > cache.length ())
     {
-      buffer_free (&cache);
+      cache.clear ();
       return -3;
     }
 
-  if (len > cache.used_size - offset)
-    len = cache.used_size - offset;
+  if (len > cache.length () - offset)
+    len = cache.length () - offset;
 
-  memcpy (readbuf, cache.buffer + offset, len);
+  memcpy (readbuf, cache.c_str () + offset, len);
 
   return len;
 }
@@ -1946,7 +1895,7 @@ handle_qxfer_btrace_conf (const char *annex,
 			  ULONGEST offset, LONGEST len)
 {
   client_state &cs = get_client_state ();
-  static struct buffer cache;
+  static std::string cache;
   struct thread_info *thread;
   int result;
 
@@ -1978,13 +1927,13 @@ handle_qxfer_btrace_conf (const char *annex,
 
   if (offset == 0)
     {
-      buffer_free (&cache);
+      cache.clear ();
 
       try
 	{
 	  result = target_read_btrace_conf (thread->btrace, &cache);
 	  if (result != 0)
-	    memcpy (cs.own_buf, cache.buffer, cache.used_size);
+	    memcpy (cs.own_buf, cache.c_str (), cache.length ());
 	}
       catch (const gdb_exception_error &exception)
 	{
@@ -1995,16 +1944,16 @@ handle_qxfer_btrace_conf (const char *annex,
       if (result != 0)
 	return -3;
     }
-  else if (offset > cache.used_size)
+  else if (offset > cache.length ())
     {
-      buffer_free (&cache);
+      cache.clear ();
       return -3;
     }
 
-  if (len > cache.used_size - offset)
-    len = cache.used_size - offset;
+  if (len > cache.length () - offset)
+    len = cache.length () - offset;
 
-  memcpy (readbuf, cache.buffer + offset, len);
+  memcpy (readbuf, cache.c_str () + offset, len);
 
   return len;
 }
@@ -2510,7 +2459,8 @@ handle_query (char *own_buf, int packet_len, int *new_packet_len_p)
       if (target_supports_agent ())
 	strcat (own_buf, ";QAgent+");
 
-      supported_btrace_packets (own_buf);
+      if (the_target->supports_btrace ())
+	supported_btrace_packets (own_buf);
 
       if (target_supports_stopped_by_sw_breakpoint ())
 	strcat (own_buf, ";swbreak+");
@@ -3017,16 +2967,11 @@ handle_v_run (char *own_buf)
   char *p, *next_p;
   std::vector<char *> new_argv;
   char *new_program_name = NULL;
-  int i, new_argc;
+  int i;
 
-  new_argc = 0;
-  for (p = own_buf + strlen ("vRun;"); p && *p; p = strchr (p, ';'))
-    {
-      p++;
-      new_argc++;
-    }
-
-  for (i = 0, p = own_buf + strlen ("vRun;"); *p; p = next_p, ++i)
+  for (i = 0, p = own_buf + strlen ("vRun;");
+       /* Exit condition is at the end of the loop.  */;
+       p = next_p + 1, ++i)
     {
       next_p = strchr (p, ';');
       if (next_p == NULL)
@@ -3044,59 +2989,22 @@ handle_v_run (char *own_buf)
 	}
       else
 	{
+	  /* The length of the decoded argument.  */
 	  size_t len = (next_p - p) / 2;
-	  /* ARG is the unquoted argument received via the RSP.  */
+
+	  /* Buffer to decode the argument into.  */
 	  char *arg = (char *) xmalloc (len + 1);
-	  /* FULL_ARGS will contain the quoted version of ARG.  */
-	  char *full_arg = (char *) xmalloc ((len + 1) * 2);
-	  /* These are pointers used to navigate the strings above.  */
-	  char *tmp_arg = arg;
-	  char *tmp_full_arg = full_arg;
-	  int need_quote = 0;
 
 	  hex2bin (p, (gdb_byte *) arg, len);
 	  arg[len] = '\0';
 
-	  while (*tmp_arg != '\0')
-	    {
-	      switch (*tmp_arg)
-		{
-		case '\n':
-		  /* Quote \n.  */
-		  *tmp_full_arg = '\'';
-		  ++tmp_full_arg;
-		  need_quote = 1;
-		  break;
-
-		case '\'':
-		  /* Quote single quote.  */
-		  *tmp_full_arg = '\\';
-		  ++tmp_full_arg;
-		  break;
-
-		default:
-		  break;
-		}
-
-	      *tmp_full_arg = *tmp_arg;
-	      ++tmp_full_arg;
-	      ++tmp_arg;
-	    }
-
-	  if (need_quote)
-	    *tmp_full_arg++ = '\'';
-
-	  /* Finish FULL_ARG and push it into the vector containing
-	     the argv.  */
-	  *tmp_full_arg = '\0';
 	  if (i == 0)
-	    new_program_name = full_arg;
+	    new_program_name = arg;
 	  else
-	    new_argv.push_back (full_arg);
-	  xfree (arg);
+	    new_argv.push_back (arg);
 	}
-      if (*next_p)
-	next_p++;
+      if (*next_p == '\0')
+	break;
     }
 
   if (new_program_name == NULL)
@@ -3111,7 +3019,7 @@ handle_v_run (char *own_buf)
 	}
     }
   else
-    program_path.set (gdb::unique_xmalloc_ptr<char> (new_program_name));
+    program_path.set (new_program_name);
 
   /* Free the old argv and install the new one.  */
   free_vector_argv (program_args);
@@ -3254,7 +3162,7 @@ handle_v_requests (char *own_buf, int packet_len, int *new_packet_len)
 }
 
 /* Resume thread and wait for another event.  In non-stop mode,
-   don't really wait here, but return immediatelly to the event
+   don't really wait here, but return immediately to the event
    loop.  */
 static void
 myresume (char *own_buf, int step, int sig)
@@ -3454,7 +3362,7 @@ static void
 gdbserver_version (void)
 {
   printf ("GNU gdbserver %s%s\n"
-	  "Copyright (C) 2022 Free Software Foundation, Inc.\n"
+	  "Copyright (C) 2023 Free Software Foundation, Inc.\n"
 	  "gdbserver is free software, covered by the "
 	  "GNU General Public License.\n"
 	  "This gdbserver was configured as \"%s\"\n",
@@ -3968,7 +3876,7 @@ captured_main (int argc, char *argv[])
       int i, n;
 
       n = argc - (next_arg - argv);
-      program_path.set (make_unique_xstrdup (next_arg[0]));
+      program_path.set (next_arg[0]);
       for (i = 1; i < n; i++)
 	program_args.push_back (xstrdup (next_arg[i]));
 

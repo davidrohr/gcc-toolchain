@@ -1,6 +1,6 @@
 /* DWARF 2 location expression support for GDB.
 
-   Copyright (C) 2003-2022 Free Software Foundation, Inc.
+   Copyright (C) 2003-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -37,7 +37,7 @@ extern unsigned int entry_values_debug;
 
 /* Find a particular location expression from a location list.  */
 const gdb_byte *dwarf2_find_location_expression
-  (struct dwarf2_loclist_baton *baton,
+  (const dwarf2_loclist_baton *baton,
    size_t *locexpr_length,
    CORE_ADDR pc);
 
@@ -65,7 +65,7 @@ value *compute_var_value (const char *name);
    otherwise.  */
 
 struct call_site_parameter *dwarf_expr_reg_to_entry_parameter
-  (struct frame_info *frame, enum call_site_parameter_kind kind,
+  (frame_info_ptr frame, enum call_site_parameter_kind kind,
    union call_site_parameter_u kind_u, dwarf2_per_cu_data **per_cu_return,
    dwarf2_per_objfile **per_objfile_return);
 
@@ -76,7 +76,7 @@ struct call_site_parameter *dwarf_expr_reg_to_entry_parameter
    be a value or a location description.  */
 
 struct value *dwarf2_evaluate_loc_desc (struct type *type,
-					struct frame_info *frame,
+					frame_info_ptr frame,
 					const gdb_byte *data,
 					size_t size,
 					dwarf2_per_cu_data *per_cu,
@@ -114,14 +114,16 @@ struct property_addr_info
    Returns true if PROP could be converted and the static value is passed
    back into VALUE, otherwise returns false.
 
-   If PUSH_INITIAL_VALUE is true, then the top value of ADDR_STACK
-   will be pushed before evaluating a location expression.  */
+   Any values in PUSH_VALUES will be pushed before evaluating the location
+   expression, PUSH_VALUES[0] will be pushed first, then PUSH_VALUES[1],
+   etc.  This means the during evaluation PUSH_VALUES[0] will be at the
+   bottom of the stack.  */
 
 bool dwarf2_evaluate_property (const struct dynamic_prop *prop,
-			       struct frame_info *frame,
+			       frame_info_ptr frame,
 			       const struct property_addr_info *addr_stack,
 			       CORE_ADDR *value,
-			       bool push_initial_value = false);
+			       gdb::array_view<CORE_ADDR> push_values = {});
 
 /* A helper for the compiler interface that compiles a single dynamic
    property to C code.
@@ -178,7 +180,7 @@ struct dwarf2_loclist_baton
 {
   /* The initial base address for the location list, based on the compilation
      unit.  */
-  CORE_ADDR base_address;
+  unrelocated_addr base_address;
 
   /* Pointer to the start of the location list.  */
   const gdb_byte *data;
@@ -244,9 +246,11 @@ struct dwarf2_property_baton
 
 extern const struct symbol_computed_ops dwarf2_locexpr_funcs;
 extern const struct symbol_computed_ops dwarf2_loclist_funcs;
+extern const struct symbol_computed_ops ada_imported_funcs;
 
 extern const struct symbol_block_ops dwarf2_block_frame_base_locexpr_funcs;
 extern const struct symbol_block_ops dwarf2_block_frame_base_loclist_funcs;
+extern const struct symbol_block_ops ada_function_alias_funcs;
 
 /* Determined tail calls for constructing virtual tail call frames.  */
 
@@ -291,7 +295,18 @@ extern void invalid_synthetic_pointer ();
 
 extern struct value *indirect_synthetic_pointer
   (sect_offset die, LONGEST byte_offset, dwarf2_per_cu_data *per_cu,
-   dwarf2_per_objfile *per_objfile, struct frame_info *frame,
+   dwarf2_per_objfile *per_objfile, frame_info_ptr frame,
    struct type *type, bool resolve_abstract_p = false);
 
-#endif /* dwarf2loc.h */
+/* Read parameter of TYPE at (callee) FRAME's function entry.  KIND and KIND_U
+   are used to match DW_AT_location at the caller's
+   DW_TAG_call_site_parameter.
+
+   Function always returns non-NULL value.  It throws NO_ENTRY_VALUE_ERROR if
+   it cannot resolve the parameter for any reason.  */
+
+extern struct value *value_of_dwarf_reg_entry (struct type *type,
+					       struct frame_info_ptr frame,
+					       enum call_site_parameter_kind kind,
+					       union call_site_parameter_u kind_u);
+#endif /* DWARF2LOC_H */

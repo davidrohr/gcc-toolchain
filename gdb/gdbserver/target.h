@@ -1,5 +1,5 @@
 /* Target operations for the remote server for GDB.
-   Copyright (C) 2002-2022 Free Software Foundation, Inc.
+   Copyright (C) 2002-2023 Free Software Foundation, Inc.
 
    Contributed by MontaVista Software.
 
@@ -21,7 +21,7 @@
 #ifndef GDBSERVER_TARGET_H
 #define GDBSERVER_TARGET_H
 
-#include <sys/types.h> /* for mode_t */
+#include <sys/types.h>
 #include "target/target.h"
 #include "target/resume.h"
 #include "target/wait.h"
@@ -33,7 +33,6 @@
 #include "gdbsupport/byte-vector.h"
 
 struct emit_ops;
-struct buffer;
 struct process_info;
 
 /* This structure describes how to resume a particular thread (or all
@@ -141,21 +140,6 @@ public:
      If REGNO is -1, store all registers; otherwise, store at least REGNO.  */
   virtual void store_registers (regcache *regcache, int regno) = 0;
 
-  /* Prepare to read or write memory from the inferior process.
-     Targets use this to do what is necessary to get the state of the
-     inferior such that it is possible to access memory.
-
-     This should generally only be called from client facing routines,
-     such as gdb_read_memory/gdb_write_memory, or the GDB breakpoint
-     insertion routine.
-
-     Like `read_memory' and `write_memory' below, returns 0 on success
-     and errno on failure.  */
-  virtual int prepare_to_access_memory ();
-
-  /* Undo the effects of prepare_to_access_memory.  */
-  virtual void done_accessing_memory ();
-
   /* Read memory from the inferior process.  This should generally be
      called through read_inferior_memory, which handles breakpoint shadowing.
 
@@ -187,10 +171,10 @@ public:
   /* Return true if the read_auxv target op is supported.  */
   virtual bool supports_read_auxv ();
 
-  /* Read auxiliary vector data from the inferior process.
+  /* Read auxiliary vector data from the process with pid PID.
 
      Read LEN bytes at OFFSET into a buffer at MYADDR.  */
-  virtual int read_auxv (CORE_ADDR offset, unsigned char *myaddr,
+  virtual int read_auxv (int pid, CORE_ADDR offset, unsigned char *myaddr,
 			 unsigned int len);
 
   /* Returns true if GDB Z breakpoint type TYPE is supported, false
@@ -403,6 +387,9 @@ public:
   /* Return true if target supports debugging agent.  */
   virtual bool supports_agent ();
 
+  /* Return true if target supports btrace.  */
+  virtual bool supports_btrace ();
+
   /* Enable branch tracing for TP based on CONF and allocate a branch trace
      target information struct for reading and for disabling branch trace.  */
   virtual btrace_target_info *enable_btrace (thread_info *tp,
@@ -415,14 +402,14 @@ public:
   /* Read branch trace data into buffer.
      Return 0 on success; print an error message into BUFFER and return -1,
      otherwise.  */
-  virtual int read_btrace (btrace_target_info *tinfo, buffer *buf,
+  virtual int read_btrace (btrace_target_info *tinfo, std::string *buf,
 			   enum btrace_read_type type);
 
   /* Read the branch trace configuration into BUFFER.
      Return 0 on success; print an error message into BUFFER and return -1
      otherwise.  */
   virtual int read_btrace_conf (const btrace_target_info *tinfo,
-				buffer *buf);
+				std::string *buf);
 
   /* Return true if target supports range stepping.  */
   virtual bool supports_range_stepping ();
@@ -648,7 +635,7 @@ target_disable_btrace (struct btrace_target_info *tinfo)
 
 static inline int
 target_read_btrace (struct btrace_target_info *tinfo,
-		    struct buffer *buffer,
+		    std::string *buffer,
 		    enum btrace_read_type type)
 {
   return the_target->read_btrace (tinfo, buffer, type);
@@ -656,7 +643,7 @@ target_read_btrace (struct btrace_target_info *tinfo,
 
 static inline int
 target_read_btrace_conf (struct btrace_target_info *tinfo,
-			 struct buffer *buffer)
+			 std::string *buffer)
 {
   return the_target->read_btrace_conf (tinfo, buffer);
 }
@@ -691,12 +678,6 @@ target_read_btrace_conf (struct btrace_target_info *tinfo,
 ptid_t mywait (ptid_t ptid, struct target_waitstatus *ourstatus,
 	       target_wait_flags options, int connected_wait);
 
-/* Prepare to read or write memory from the inferior process.  See the
-   corresponding process_stratum_target methods for more details.  */
-
-int prepare_to_access_memory (void);
-void done_accessing_memory (void);
-
 #define target_core_of_thread(ptid)		\
   the_target->core_of_thread (ptid)
 
@@ -718,9 +699,25 @@ target_thread_pending_child (thread_info *thread)
   return the_target->thread_pending_child (thread);
 }
 
+/* Read LEN bytes from MEMADDR in the buffer MYADDR.  Return 0 if the read
+   is successful, otherwise, return a non-zero error code.  */
+
 int read_inferior_memory (CORE_ADDR memaddr, unsigned char *myaddr, int len);
 
-int set_desired_thread ();
+/* Set GDBserver's current thread to the thread the client requested
+   via Hg.  Also switches the current process to the requested
+   process.  If the requested thread is not found in the thread list,
+   then the current thread is set to NULL.  Likewise, if the requested
+   process is not found in the process list, then the current process
+   is set to NULL.  Returns true if the requested thread was found,
+   false otherwise.  */
+
+bool set_desired_thread ();
+
+/* Set GDBserver's current process to the process the client requested
+   via Hg.  The current thread is set to NULL.  */
+
+bool set_desired_process ();
 
 std::string target_pid_to_str (ptid_t);
 

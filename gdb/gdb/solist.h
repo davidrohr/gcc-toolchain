@@ -1,5 +1,5 @@
 /* Shared library declarations for GDB, the GNU Debugger.
-   Copyright (C) 1990-2022 Free Software Foundation, Inc.
+   Copyright (C) 1990-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -54,9 +54,6 @@ struct so_list
 
   /* Shared object file name, expanded to something GDB can open.  */
   char so_name[SO_NAME_MAX_PATH_SIZE];
-
-  /* Program space this shared library belongs to.  */
-  struct program_space *pspace;
 
   /* The following fields of the structure are built from
      information gathered from the shared object file itself, and
@@ -193,8 +190,5 @@ extern gdb_bfd_ref_ptr solib_bfd_fopen (const char *pathname, int fd);
 
 /* Find solib binary file and open it.  */
 extern gdb_bfd_ref_ptr solib_bfd_open (const char *in_pathname);
-
-/* FIXME: gdbarch needs to control this variable.  */
-extern struct target_so_ops *current_target_so_ops;
 
 #endif

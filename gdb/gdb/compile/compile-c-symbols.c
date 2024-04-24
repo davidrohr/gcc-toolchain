@@ -1,6 +1,6 @@
 /* Convert symbols from GDB to GCC
 
-   Copyright (C) 2014-2022 Free Software Foundation, Inc.
+   Copyright (C) 2014-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -57,8 +57,8 @@ convert_one_symbol (compile_c_instance *context,
 		    int is_local)
 {
   gcc_type sym_type;
-  const char *filename = symbol_symtab (sym.symbol)->filename;
-  unsigned short line = sym.symbol->line ();
+  const char *filename = sym.symbol->symtab ()->filename;
+  unsigned int line = sym.symbol->line ();
 
   context->error_symbol_once (sym.symbol);
 
@@ -88,12 +88,12 @@ convert_one_symbol (compile_c_instance *context,
 
 	case LOC_LABEL:
 	  kind = GCC_C_SYMBOL_LABEL;
-	  addr = SYMBOL_VALUE_ADDRESS (sym.symbol);
+	  addr = sym.symbol->value_address ();
 	  break;
 
 	case LOC_BLOCK:
 	  kind = GCC_C_SYMBOL_FUNCTION;
-	  addr = BLOCK_ENTRY_PC (SYMBOL_BLOCK_VALUE (sym.symbol));
+	  addr = sym.symbol->value_block ()->entry_pc ();
 	  if (is_global && sym.symbol->type ()->is_gnu_ifunc ())
 	    addr = gnu_ifunc_resolve_addr (target_gdbarch (), addr);
 	  break;
@@ -106,7 +106,7 @@ convert_one_symbol (compile_c_instance *context,
 	    }
 	  context->plugin ().build_constant
 	    (sym_type, sym.symbol->natural_name (),
-	     SYMBOL_VALUE (sym.symbol),
+	     sym.symbol->value_longest (),
 	     filename, line);
 	  return;
 
@@ -115,7 +115,7 @@ convert_one_symbol (compile_c_instance *context,
 		 sym.symbol->print_name ());
 
 	case LOC_UNDEF:
-	  internal_error (__FILE__, __LINE__, _("LOC_UNDEF found for \"%s\"."),
+	  internal_error (_("LOC_UNDEF found for \"%s\"."),
 			  sym.symbol->print_name ());
 
 	case LOC_COMMON_BLOCK:
@@ -144,7 +144,7 @@ convert_one_symbol (compile_c_instance *context,
 	     by their name.  */
 	  {
 	    struct value *val;
-	    struct frame_info *frame = NULL;
+	    frame_info_ptr frame = NULL;
 
 	    if (symbol_read_needs_frame (sym.symbol))
 	      {
@@ -156,13 +156,13 @@ convert_one_symbol (compile_c_instance *context,
 	      }
 
 	    val = read_var_value (sym.symbol, sym.block, frame);
-	    if (VALUE_LVAL (val) != lval_memory)
+	    if (val->lval () != lval_memory)
 	      error (_("Symbol \"%s\" cannot be used for compilation "
 		       "evaluation as its address has not been found."),
 		     sym.symbol->print_name ());
 
 	    kind = GCC_C_SYMBOL_VARIABLE;
-	    addr = value_address (val);
+	    addr = val->address ();
 	  }
 	  break;
 
@@ -179,7 +179,7 @@ convert_one_symbol (compile_c_instance *context,
 
 	case LOC_STATIC:
 	  kind = GCC_C_SYMBOL_VARIABLE;
-	  addr = SYMBOL_VALUE_ADDRESS (sym.symbol);
+	  addr = sym.symbol->value_address ();
 	  break;
 
 	case LOC_FINAL_VALUE:
@@ -212,7 +212,6 @@ static void
 convert_symbol_sym (compile_c_instance *context, const char *identifier,
 		    struct block_symbol sym, domain_enum domain)
 {
-  const struct block *static_block;
   int is_local_symbol;
 
   /* If we found a symbol and it is not in the  static or global
@@ -227,7 +226,9 @@ convert_symbol_sym (compile_c_instance *context, const char *identifier,
      }
   */
 
-  static_block = block_static_block (sym.block);
+  const struct block *static_block = nullptr;
+  if (sym.block != nullptr)
+    static_block = sym.block->static_block ();
   /* STATIC_BLOCK is NULL if FOUND_BLOCK is the global block.  */
   is_local_symbol = (sym.block != static_block && static_block != NULL);
   if (is_local_symbol)
@@ -238,20 +239,20 @@ convert_symbol_sym (compile_c_instance *context, const char *identifier,
       /* If the outer symbol is in the static block, we ignore it, as
 	 it cannot be referenced.  */
       if (global_sym.symbol != NULL
-	  && global_sym.block != block_static_block (global_sym.block))
+	  && global_sym.block != global_sym.block->static_block ())
 	{
 	  if (compile_debug)
-	    fprintf_unfiltered (gdb_stdlog,
-				"gcc_convert_symbol \"%s\": global symbol\n",
-				identifier);
+	    gdb_printf (gdb_stdlog,
+			"gcc_convert_symbol \"%s\": global symbol\n",
+			identifier);
 	  convert_one_symbol (context, global_sym, 1, 0);
 	}
     }
 
   if (compile_debug)
-    fprintf_unfiltered (gdb_stdlog,
-			"gcc_convert_symbol \"%s\": local symbol\n",
-			identifier);
+    gdb_printf (gdb_stdlog,
+		"gcc_convert_symbol \"%s\": local symbol\n",
+		identifier);
   convert_one_symbol (context, sym, 0, is_local_symbol);
 }
 
@@ -270,20 +271,20 @@ convert_symbol_bmsym (compile_c_instance *context,
   gcc_decl decl;
   CORE_ADDR addr;
 
-  addr = MSYMBOL_VALUE_ADDRESS (objfile, msym);
+  addr = msym->value_address (objfile);
 
   /* Conversion copied from write_exp_msymbol.  */
-  switch (MSYMBOL_TYPE (msym))
+  switch (msym->type ())
     {
     case mst_text:
     case mst_file_text:
     case mst_solib_trampoline:
-      type = objfile_type (objfile)->nodebug_text_symbol;
+      type = builtin_type (objfile)->nodebug_text_symbol;
       kind = GCC_C_SYMBOL_FUNCTION;
       break;
 
     case mst_text_gnu_ifunc:
-      type = objfile_type (objfile)->nodebug_text_gnu_ifunc_symbol;
+      type = builtin_type (objfile)->nodebug_text_gnu_ifunc_symbol;
       kind = GCC_C_SYMBOL_FUNCTION;
       addr = gnu_ifunc_resolve_addr (target_gdbarch (), addr);
       break;
@@ -292,17 +293,17 @@ convert_symbol_bmsym (compile_c_instance *context,
     case mst_file_data:
     case mst_bss:
     case mst_file_bss:
-      type = objfile_type (objfile)->nodebug_data_symbol;
+      type = builtin_type (objfile)->nodebug_data_symbol;
       kind = GCC_C_SYMBOL_VARIABLE;
       break;
 
     case mst_slot_got_plt:
-      type = objfile_type (objfile)->nodebug_got_plt_symbol;
+      type = builtin_type (objfile)->nodebug_got_plt_symbol;
       kind = GCC_C_SYMBOL_FUNCTION;
       break;
 
     default:
-      type = objfile_type (objfile)->nodebug_unknown_symbol;
+      type = builtin_type (objfile)->nodebug_unknown_symbol;
       kind = GCC_C_SYMBOL_VARIABLE;
       break;
     }
@@ -373,9 +374,9 @@ gcc_convert_symbol (void *datum,
     }
 
   if (compile_debug && !found)
-    fprintf_unfiltered (gdb_stdlog,
-			"gcc_convert_symbol \"%s\": lookup_symbol failed\n",
-			identifier);
+    gdb_printf (gdb_stdlog,
+		"gcc_convert_symbol \"%s\": lookup_symbol failed\n",
+		identifier);
   return;
 }
 
@@ -401,10 +402,10 @@ gcc_symbol_address (void *datum, struct gcc_c_context *gcc_context,
       if (sym != NULL && sym->aclass () == LOC_BLOCK)
 	{
 	  if (compile_debug)
-	    fprintf_unfiltered (gdb_stdlog,
-				"gcc_symbol_address \"%s\": full symbol\n",
-				identifier);
-	  result = BLOCK_ENTRY_PC (SYMBOL_BLOCK_VALUE (sym));
+	    gdb_printf (gdb_stdlog,
+			"gcc_symbol_address \"%s\": full symbol\n",
+			identifier);
+	  result = sym->value_block ()->entry_pc ();
 	  if (sym->type ()->is_gnu_ifunc ())
 	    result = gnu_ifunc_resolve_addr (target_gdbarch (), result);
 	  found = 1;
@@ -417,12 +418,12 @@ gcc_symbol_address (void *datum, struct gcc_c_context *gcc_context,
 	  if (msym.minsym != NULL)
 	    {
 	      if (compile_debug)
-		fprintf_unfiltered (gdb_stdlog,
-				    "gcc_symbol_address \"%s\": minimal "
-				    "symbol\n",
-				    identifier);
-	      result = BMSYMBOL_VALUE_ADDRESS (msym);
-	      if (MSYMBOL_TYPE (msym.minsym) == mst_text_gnu_ifunc)
+		gdb_printf (gdb_stdlog,
+			    "gcc_symbol_address \"%s\": minimal "
+			    "symbol\n",
+			    identifier);
+	      result = msym.value_address ();
+	      if (msym.minsym->type () == mst_text_gnu_ifunc)
 		result = gnu_ifunc_resolve_addr (target_gdbarch (), result);
 	      found = 1;
 	    }
@@ -435,9 +436,9 @@ gcc_symbol_address (void *datum, struct gcc_c_context *gcc_context,
     }
 
   if (compile_debug && !found)
-    fprintf_unfiltered (gdb_stdlog,
-			"gcc_symbol_address \"%s\": failed\n",
-			identifier);
+    gdb_printf (gdb_stdlog,
+		"gcc_symbol_address \"%s\": failed\n",
+		identifier);
   return result;
 }
 
@@ -495,7 +496,7 @@ generate_vla_size (compile_instance *compiler,
   type = check_typedef (type);
 
   if (TYPE_IS_REFERENCE (type))
-    type = check_typedef (TYPE_TARGET_TYPE (type));
+    type = check_typedef (type->target_type ());
 
   switch (type->code ())
     {
@@ -518,7 +519,7 @@ generate_vla_size (compile_instance *compiler,
       generate_vla_size (compiler, stream, gdbarch, registers_used, pc,
 			 type->index_type (), sym);
       generate_vla_size (compiler, stream, gdbarch, registers_used, pc,
-			 TYPE_TARGET_TYPE (type), sym);
+			 type->target_type (), sym);
       break;
 
     case TYPE_CODE_UNION:
@@ -527,7 +528,7 @@ generate_vla_size (compile_instance *compiler,
 	int i;
 
 	for (i = 0; i < type->num_fields (); ++i)
-	  if (!field_is_static (&type->field (i)))
+	  if (!type->field (i).is_static ())
 	    generate_vla_size (compiler, stream, gdbarch, registers_used, pc,
 			       type->field (i).type (), sym);
       }
@@ -613,7 +614,10 @@ generate_c_for_variable_locations (compile_instance *compiler,
 				   const struct block *block,
 				   CORE_ADDR pc)
 {
-  const struct block *static_block = block_static_block (block);
+  if (block == nullptr)
+    return {};
+
+  const struct block *static_block = block->static_block ();
 
   /* If we're already in the static or global block, there is nothing
      to write.  */
@@ -629,14 +633,9 @@ generate_c_for_variable_locations (compile_instance *compiler,
 
   while (1)
     {
-      struct symbol *sym;
-      struct block_iterator iter;
-
       /* Iterate over symbols in this block, generating code to
 	 compute the location of each local variable.  */
-      for (sym = block_iterator_first (block, &iter);
-	   sym != NULL;
-	   sym = block_iterator_next (&iter))
+      for (struct symbol *sym : block_iterator_range (block))
 	{
 	  if (!symbol_seen (symhash.get (), sym))
 	    generate_c_for_for_one_variable (compiler, stream, gdbarch,
@@ -645,9 +644,9 @@ generate_c_for_variable_locations (compile_instance *compiler,
 
       /* If we just finished the outermost block of a function, we're
 	 done.  */
-      if (BLOCK_FUNCTION (block) != NULL)
+      if (block->function () != NULL)
 	break;
-      block = BLOCK_SUPERBLOCK (block);
+      block = block->superblock ();
     }
 
   return registers_used;

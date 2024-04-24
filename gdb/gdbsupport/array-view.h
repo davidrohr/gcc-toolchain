@@ -1,4 +1,4 @@
-/* Copyright (C) 2017-2022 Free Software Foundation, Inc.
+/* Copyright (C) 2017-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -21,6 +21,7 @@
 #include "traits.h"
 #include <algorithm>
 #include <type_traits>
+#include "gdbsupport/gdb_assert.h"
 
 /* An array_view is an abstraction that provides a non-owning view
    over a sequence of contiguous objects.
@@ -278,7 +279,7 @@ operator!= (const gdb::array_view<T> &lhs, const gdb::array_view<T> &rhs)
      foo (1, 2, gdb::array_view<value *>(values, nargs));
 
    Or, better, using make_array_view, which has the advantage of
-   inferring the arrav_view element's type:
+   inferring the array_view element's type:
 
      foo (1, 2, gdb::make_array_view (values, nargs));
 */

@@ -1,6 +1,6 @@
 /* Python interface to btrace instruction history.
 
-   Copyright 2016-2022 Free Software Foundation, Inc.
+   Copyright 2016-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -27,16 +27,6 @@
 #include "record-btrace.h"
 #include "disasm.h"
 #include "gdbarch.h"
-
-#if defined (IS_PY3K)
-
-#define BTPY_PYSLICE(x) (x)
-
-#else
-
-#define BTPY_PYSLICE(x) ((PySliceObject *) x)
-
-#endif
 
 /* Python object for btrace record lists.  */
 
@@ -179,8 +169,8 @@ btpy_insn_or_gap_new (thread_info *tinfo, Py_ssize_t number)
 /* Create a new gdb.BtraceList object.  */
 
 static PyObject *
-btpy_list_new (thread_info *thread, Py_ssize_t first, Py_ssize_t last, Py_ssize_t step,
-	       PyTypeObject *element_type)
+btpy_list_new (thread_info *thread, Py_ssize_t first, Py_ssize_t last,
+	       Py_ssize_t step, PyTypeObject *element_type)
 {
   btpy_list_object * const obj = PyObject_New (btpy_list_object,
 					       &btpy_list_type);
@@ -295,12 +285,7 @@ recpy_bt_insn_data (PyObject *self, void *closure)
   if (object == NULL)
     return NULL;
 
-#ifdef IS_PY3K
   return PyMemoryView_FromObject (object);
-#else
-  return PyBuffer_FromObject (object, 0, Py_END_OF_BUFFER);
-#endif
-
 }
 
 /* Implementation of RecordInstruction.decoded [str] for btrace.
@@ -324,7 +309,6 @@ recpy_bt_insn_decoded (PyObject *self, void *closure)
       gdbpy_convert_exception (except);
       return NULL;
     }
-
 
   return PyBytes_FromString (strfile.string ().c_str ());
 }
@@ -486,9 +470,9 @@ btpy_list_slice (PyObject *self, PyObject *value)
   const Py_ssize_t length = btpy_list_length (self);
   Py_ssize_t start, stop, step, slicelength;
 
-  if (PyInt_Check (value))
+  if (PyLong_Check (value))
     {
-      Py_ssize_t index = PyInt_AsSsize_t (value);
+      Py_ssize_t index = PyLong_AsSsize_t (value);
 
       /* Emulate Python behavior for negative indices.  */
       if (index < 0)
@@ -500,7 +484,7 @@ btpy_list_slice (PyObject *self, PyObject *value)
   if (!PySlice_Check (value))
     return PyErr_Format (PyExc_TypeError, _("Index must be int or slice."));
 
-  if (0 != PySlice_GetIndicesEx (BTPY_PYSLICE (value), length, &start, &stop,
+  if (0 != PySlice_GetIndicesEx (value, length, &start, &stop,
 				 &step, &slicelength))
     return NULL;
 
@@ -622,7 +606,7 @@ btpy_list_richcompare (PyObject *self, PyObject *other, int op)
 PyObject *
 recpy_bt_method (PyObject *self, void *closure)
 {
-  return PyString_FromString ("btrace");
+  return PyUnicode_FromString ("btrace");
 }
 
 /* Implementation of
@@ -643,7 +627,7 @@ recpy_bt_format (PyObject *self, void *closure)
   if (config == NULL)
     Py_RETURN_NONE;
 
-  return PyString_FromString (btrace_format_short_string (config->format));
+  return PyUnicode_FromString (btrace_format_short_string (config->format));
 }
 
 /* Implementation of
@@ -831,7 +815,7 @@ static PyMappingMethods btpy_list_mapping_methods =
 
 /* Sets up the btrace record API.  */
 
-int
+static int CPYCHECKER_NEGATIVE_RESULT_SETS_EXCEPTION
 gdbpy_initialize_btrace (void)
 {
   btpy_list_type.tp_new = PyType_GenericNew;
@@ -852,3 +836,5 @@ gdbpy_initialize_btrace (void)
 
   return PyType_Ready (&btpy_list_type);
 }
+
+GDBPY_INITIALIZE_FILE (gdbpy_initialize_btrace);

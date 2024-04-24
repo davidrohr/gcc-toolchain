@@ -1,4 +1,4 @@
-# Copyright (C) 2016-2022 Free Software Foundation, Inc.
+# Copyright (C) 2016-2023 Free Software Foundation, Inc.
 
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -91,45 +91,25 @@ proc gdb_test_internal {cmd pattern {message ""}} {
 gdb_test_internal "set max-completions unlimited" \
     "^set max-completions unlimited"
 
-# Return a list of all the accepted values of "set WHAT".
-
-proc get_set_option_choices {what} {
-    global gdb_prompt
-
-    set values {}
-
-    set test "complete set $what"
-    gdb_test_multiple "complete set $what " "$test" {
-	-re "set $what (\[^\r\n\]+)\r\n" {
-	    lappend values $expect_out(1,string)
-	    exp_continue
-	}
-	-re "$gdb_prompt " {
-	    internal_pass $test
-	}
-    }
-    return $values
-}
-
-set supported_archs [get_set_option_choices "architecture"]
+set supported_archs [get_set_option_choices "set architecture"]
 # There should be at least one more than "auto".
 gdb_assert {[llength $supported_archs] > 1} "at least one architecture"
 
-set supported_osabis [get_set_option_choices "osabi"]
+set supported_osabis [get_set_option_choices "set osabi"]
 # There should be at least one more than "auto" and "default".
 gdb_assert {[llength $supported_osabis] > 2} "at least one osabi"
 
 if {[lsearch $supported_archs "mips"] >= 0} {
-    set supported_mipsfpu [get_set_option_choices "mipsfpu"]
-    set supported_mips_abi [get_set_option_choices "mips abi"]
+    set supported_mipsfpu [get_set_option_choices "set mipsfpu"]
+    set supported_mips_abi [get_set_option_choices "set mips abi"]
 
     gdb_assert {[llength $supported_mipsfpu] != 0} "at least one mipsfpu"
     gdb_assert {[llength $supported_mips_abi] != 0} "at least one mips abi"
 }
 
 if {[lsearch $supported_archs "arm"] >= 0} {
-    set supported_arm_fpu [get_set_option_choices "arm fpu"]
-    set supported_arm_abi [get_set_option_choices "arm abi"]
+    set supported_arm_fpu [get_set_option_choices "set arm fpu"]
+    set supported_arm_abi [get_set_option_choices "set arm abi"]
 
     gdb_assert {[llength $supported_arm_fpu] != 0} "at least one arm fpu"
     gdb_assert {[llength $supported_arm_abi] != 0} "at least one arm abi"
@@ -202,7 +182,7 @@ proc gdb_test_no_output_osabi {cmd test} {
 
 # It'd be nicer/safer to restart GDB on each iteration, but, that
 # increases the testcase's run time several times fold.  At the time
-# of writting, it'd jump from 20s to 4min on x86-64 GNU/Linux with
+# of writing, it'd jump from 20s to 4min on x86-64 GNU/Linux with
 # --enable-targets=all.
 
 set num_slices 8

@@ -1,6 +1,6 @@
 /* Native-dependent code for GNU/Linux i386.
 
-   Copyright (C) 1999-2022 Free Software Foundation, Inc.
+   Copyright (C) 1999-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -330,7 +330,9 @@ store_fpregs (const struct regcache *regcache, int tid, int regno)
 static int
 fetch_xstateregs (struct regcache *regcache, int tid)
 {
-  char xstateregs[X86_XSTATE_MAX_SIZE];
+  struct gdbarch *gdbarch = regcache->arch ();
+  const i386_gdbarch_tdep *tdep = gdbarch_tdep<i386_gdbarch_tdep> (gdbarch);
+  char xstateregs[tdep->xsave_layout.sizeof_xsave];
   struct iovec iov;
 
   if (have_ptrace_getregset != TRIBOOL_TRUE)
@@ -353,7 +355,9 @@ fetch_xstateregs (struct regcache *regcache, int tid)
 static int
 store_xstateregs (const struct regcache *regcache, int tid, int regno)
 {
-  char xstateregs[X86_XSTATE_MAX_SIZE];
+  struct gdbarch *gdbarch = regcache->arch ();
+  const i386_gdbarch_tdep *tdep = gdbarch_tdep<i386_gdbarch_tdep> (gdbarch);
+  char xstateregs[tdep->xsave_layout.sizeof_xsave];
   struct iovec iov;
 
   if (have_ptrace_getregset != TRIBOOL_TRUE)
@@ -527,8 +531,7 @@ i386_linux_nat_target::fetch_registers (struct regcache *regcache, int regno)
       return;
     }
 
-  internal_error (__FILE__, __LINE__,
-		  _("Got request for bad register number %d."), regno);
+  internal_error (_("Got request for bad register number %d."), regno);
 }
 
 /* Store register REGNO back into the child process.  If REGNO is -1,
@@ -592,8 +595,7 @@ i386_linux_nat_target::store_registers (struct regcache *regcache, int regno)
       return;
     }
 
-  internal_error (__FILE__, __LINE__,
-		  _("Got request to store bad register number %d."), regno);
+  internal_error (_("Got request to store bad register number %d."), regno);
 }
 
 

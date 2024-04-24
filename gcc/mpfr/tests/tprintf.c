@@ -1,6 +1,6 @@
 /* tprintf.c -- test file for mpfr_printf and mpfr_vprintf
 
-Copyright 2008-2020 Free Software Foundation, Inc.
+Copyright 2008-2023 Free Software Foundation, Inc.
 Contributed by the AriC and Caramba projects, INRIA.
 
 This file is part of the GNU MPFR Library.
@@ -62,11 +62,17 @@ https://www.gnu.org/licenses/ or write to the Free Software Foundation, Inc.,
 #define check_length_with_cmp(num_test, var, value, cmp, var_spec)      \
   if (cmp != 0)                                                         \
     {                                                                   \
-      mpfr_fprintf (stderr, "Error in test #%d, mpfr_printf printed %"  \
+      mpfr_fprintf (stderr, "Error in test #%d: mpfr_printf printed %"  \
                     QUOTE(var_spec)" characters instead of %d\n",       \
                     (num_test), (var), (value));                        \
       exit (1);                                                         \
     }
+
+#if MPFR_LCONV_DPTS
+#define DPLEN ((int) strlen (localeconv()->decimal_point))
+#else
+#define DPLEN 1
+#endif
 
 /* limit for random precision in random() */
 const int prec_max_printf = 5000;
@@ -74,7 +80,7 @@ const int prec_max_printf = 5000;
 int stdout_redirect;
 
 static void
-check (const char *fmt, mpfr_t x)
+check (const char *fmt, mpfr_ptr x)
 {
   if (mpfr_printf (fmt, x) == -1)
     {
@@ -316,11 +322,11 @@ check_mixed (void)
   check_vprintf ("a. %c, b. %Rb, c. %u, d. %li%ln", i, mpfr, i, lo, &ulo);
   check_length (2, ulo, 36, lu);
   check_vprintf ("a. %hi, b. %*f, c. %Re%hn", ush, 3, f, mpfr, &ush);
-  check_length (3, ush, 46, hu);
+  check_length (3, ush, 45 + DPLEN, hu);
   check_vprintf ("a. %hi, b. %f, c. %#.2Rf%n", sh, d, mpfr, &i);
-  check_length (4, i, 29, d);
+  check_length (4, i, 28 + DPLEN, d);
   check_vprintf ("a. %R*A, b. %Fe, c. %i%zn", rnd, mpfr, mpf, sz, &sz);
-  check_length (5, (unsigned long) sz, 34, lu); /* no format specifier '%zu' in C89 */
+  check_length (5, (unsigned long) sz, 33 + DPLEN, lu); /* no format specifier '%zu' in C90 */
   check_vprintf ("a. %Pu, b. %c, c. %RUG, d. %Zi%Zn", prec, ch, mpfr, mpz, &mpz);
   check_length_with_cmp (6, mpz, 24, mpz_cmp_ui (mpz, 24), Zi);
   check_vprintf ("%% a. %#.0RNg, b. %Qx%Rn c. %p",
@@ -332,24 +338,26 @@ check_mixed (void)
   check_vprintf ("%% a. %RNg, b. %Qx, c. %td%tn", mpfr, mpq, p, &p);
   if (p != 20)
     {
-      mpfr_fprintf (stderr, "Error in test 8, got '%% a. %RNg, b. %Qx, c. %td'\n", mpfr, mpq, saved_p);
+      mpfr_fprintf (stderr,
+                    "Error in test #8: got '%% a. %RNg, b. %Qx, c. %td'\n",
+                    mpfr, mpq, saved_p);
 #if defined(__MINGW32__) || defined(__MINGW64__)
       fprintf (stderr,
                "Your MinGW may be too old, in which case compiling GMP\n"
                "with -D__USE_MINGW_ANSI_STDIO might be required.\n");
 #endif
     }
-  check_length (8, (long) p, 20, ld); /* no format specifier '%td' in C89 */
+  check_length (8, (long) p, 20, ld); /* no format specifier '%td' in C90 */
 #endif
 
 #ifdef PRINTF_L
   check_vprintf ("a. %RA, b. %Lf, c. %QX%zn", mpfr, ld, mpq, &sz);
-  check_length (9, (unsigned long) sz, 30, lu); /* no format specifier '%zu' in C89 */
+  check_length (9, (unsigned long) sz, 29 + DPLEN, lu); /* no format specifier '%zu' in C90 */
 #endif
 
 #ifndef NPRINTF_HH
   check_vprintf ("a. %hhi, b. %Ra, c. %hhu%hhn", sch, mpfr, uch, &uch);
-  check_length (10, (unsigned int) uch, 22, u); /* no format specifier '%hhu' in C89 */
+  check_length (10, (unsigned int) uch, 22, u); /* no format specifier '%hhu' in C90 */
 #endif
 
 #if defined(HAVE_LONG_LONG) && !defined(NPRINTF_LL)
@@ -372,7 +380,7 @@ check_mixed (void)
     check_vprintf ("a. %*RA, b. %ji%Fn", 10, mpfr, im, &mpf);
     check_length_with_cmp (31, mpf, 20, mpf_cmp_ui (mpf, 20), Fg);
     check_vprintf ("a. %.*Re, b. %jx%jn", 10, mpfr, uim, &im);
-    check_length (32, (long) im, 25, li); /* no format specifier "%ji" in C89 */
+    check_length (32, (long) im, 25, li); /* no format specifier "%ji" in C90 */
   }
 #endif
 
@@ -427,7 +435,7 @@ check_random (int nb_tests)
       spec = (int) (randlimb () % 5);
       jmax = (spec == 3 || spec == 4) ? 6 : 5; /* ' flag only with %f or %g */
       /* advantage small precision */
-      prec = (randlimb () % 2) ? 10 : prec_max_printf;
+      prec = RAND_BOOL () ? 10 : prec_max_printf;
       prec = (int) (randlimb () % prec);
       if (spec == 3
           && (mpfr_get_exp (x) > prec_max_printf
@@ -468,7 +476,7 @@ check_random (int nb_tests)
 
               if (stdout_redirect)
                 {
-                  if ((fflush (stdout) == EOF) || (fclose (stdout) == -1))
+                  if ((fflush (stdout) == EOF) || (fclose (stdout) == EOF))
                     {
                       perror ("check_random");
                       exit (1);
@@ -480,8 +488,8 @@ check_random (int nb_tests)
       putchar ('\n');
     }
 
-  mpfr_set_emin (old_emin);
-  mpfr_set_emax (old_emax);
+  set_emin (old_emin);
+  set_emax (old_emax);
 
   mpfr_clear (x);
 }
@@ -636,7 +644,7 @@ main (int argc, char *argv[])
 
   if (stdout_redirect)
     {
-      if ((fflush (stdout) == EOF) || (fclose (stdout) == -1))
+      if ((fflush (stdout) == EOF) || (fclose (stdout) == EOF))
         perror ("main");
     }
   tests_end_mpfr ();

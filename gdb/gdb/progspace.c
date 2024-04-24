@@ -1,6 +1,6 @@
 /* Program and address space management, for GDB, the GNU debugger.
 
-   Copyright (C) 2009-2022 Free Software Foundation, Inc.
+   Copyright (C) 2009-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -28,6 +28,7 @@
 #include "inferior.h"
 #include <algorithm>
 #include "cli/cli-style.h"
+#include "observable.h"
 
 /* The last program space number assigned.  */
 static int last_program_space_num = 0;
@@ -43,30 +44,11 @@ static int highest_address_space_num;
 
 
 
-/* Keep a registry of per-program_space data-pointers required by other GDB
-   modules.  */
-
-DEFINE_REGISTRY (program_space, REGISTRY_ACCESS_FIELD)
-
-/* Keep a registry of per-address_space data-pointers required by other GDB
-   modules.  */
-
-DEFINE_REGISTRY (address_space, REGISTRY_ACCESS_FIELD)
-
-
-
 /* Create a new address space object, and add it to the list.  */
 
-struct address_space *
-new_address_space (void)
+address_space::address_space ()
+  : m_num (++highest_address_space_num)
 {
-  struct address_space *aspace;
-
-  aspace = XCNEW (struct address_space);
-  aspace->num = ++highest_address_space_num;
-  address_space_alloc_data (aspace);
-
-  return aspace;
 }
 
 /* Maybe create a new address space object, and add it to the list, or
@@ -84,20 +66,7 @@ maybe_new_address_space (void)
       return program_spaces[0]->aspace;
     }
 
-  return new_address_space ();
-}
-
-static void
-free_address_space (struct address_space *aspace)
-{
-  address_space_free_data (aspace);
-  xfree (aspace);
-}
-
-int
-address_space_num (struct address_space *aspace)
-{
-  return aspace->num;
+  return new address_space ();
 }
 
 /* Start counting over from scratch.  */
@@ -129,9 +98,8 @@ program_space::program_space (address_space *aspace_)
   : num (++last_program_space_num),
     aspace (aspace_)
 {
-  program_space_alloc_data (this);
-
   program_spaces.push_back (this);
+  gdb::observers::new_program_space.notify (this);
 }
 
 /* See progspace.h.  */
@@ -140,6 +108,7 @@ program_space::~program_space ()
 {
   gdb_assert (this != current_program_space);
 
+  gdb::observers::free_program_space.notify (this);
   remove_program_space (this);
 
   scoped_restore_current_program_space restore_pspace;
@@ -153,9 +122,7 @@ program_space::~program_space ()
      locations for this pspace which we're tearing down.  */
   clear_symtab_users (SYMFILE_DEFER_BP_RESET);
   if (!gdbarch_has_shared_address_space (target_gdbarch ()))
-    free_address_space (this->aspace);
-    /* Discard any data modules have associated with the PSPACE.  */
-  program_space_free_data (this);
+    delete this->aspace;
 }
 
 /* See progspace.h.  */
@@ -174,7 +141,7 @@ program_space::free_all_objfiles ()
 /* See progspace.h.  */
 
 void
-program_space::add_objfile (std::shared_ptr<objfile> &&objfile,
+program_space::add_objfile (std::unique_ptr<objfile> &&objfile,
 			    struct objfile *before)
 {
   if (before == nullptr)
@@ -182,7 +149,7 @@ program_space::add_objfile (std::shared_ptr<objfile> &&objfile,
   else
     {
       auto iter = std::find_if (objfiles_list.begin (), objfiles_list.end (),
-				[=] (const std::shared_ptr<::objfile> &objf)
+				[=] (const std::unique_ptr<::objfile> &objf)
 				{
 				  return objf.get () == before;
 				});
@@ -203,7 +170,7 @@ program_space::remove_objfile (struct objfile *objfile)
   reinit_frame_cache ();
 
   auto iter = std::find_if (objfiles_list.begin (), objfiles_list.end (),
-			    [=] (const std::shared_ptr<::objfile> &objf)
+			    [=] (const std::unique_ptr<::objfile> &objf)
 			    {
 			      return objf.get () == objfile;
 			    });
@@ -212,6 +179,22 @@ program_space::remove_objfile (struct objfile *objfile)
 
   if (objfile == symfile_object_file)
     symfile_object_file = NULL;
+}
+
+/* See progspace.h.  */
+
+struct objfile *
+program_space::objfile_for_address (CORE_ADDR address)
+{
+  for (auto iter : objfiles ())
+    {
+      /* Don't check separate debug objfiles.  */
+      if (iter->separate_debug_objfile_backlink != nullptr)
+	continue;
+      if (is_addr_in_objfile (address, iter))
+	return iter;
+    }
+  return nullptr;
 }
 
 /* See progspace.h.  */
@@ -287,11 +270,18 @@ print_program_space (struct ui_out *uiout, int requested)
 {
   int count = 0;
 
+  /* Start with a minimum width of 17 for the executable name column.  */
+  size_t longest_exec_name = 17;
+
   /* Compute number of pspaces we will print.  */
   for (struct program_space *pspace : program_spaces)
     {
       if (requested != -1 && pspace->num != requested)
 	continue;
+
+      if (pspace->exec_filename != nullptr)
+	longest_exec_name = std::max (strlen (pspace->exec_filename.get ()),
+				      longest_exec_name);
 
       ++count;
     }
@@ -299,10 +289,11 @@ print_program_space (struct ui_out *uiout, int requested)
   /* There should always be at least one.  */
   gdb_assert (count > 0);
 
-  ui_out_emit_table table_emitter (uiout, 3, count, "pspaces");
+  ui_out_emit_table table_emitter (uiout, 4, count, "pspaces");
   uiout->table_header (1, ui_left, "current", "");
   uiout->table_header (4, ui_left, "id", "Id");
-  uiout->table_header (17, ui_left, "exec", "Executable");
+  uiout->table_header (longest_exec_name, ui_left, "exec", "Executable");
+  uiout->table_header (17, ui_left, "core", "Core File");
   uiout->table_body ();
 
   for (struct program_space *pspace : program_spaces)
@@ -327,6 +318,12 @@ print_program_space (struct ui_out *uiout, int requested)
       else
 	uiout->field_skip ("exec");
 
+      if (pspace->cbfd != nullptr)
+	uiout->field_string ("core", bfd_get_filename (pspace->cbfd.get ()),
+			     file_name_style.style ());
+      else
+	uiout->field_skip ("core");
+
       /* Print extra info that doesn't really fit in tabular form.
 	 Currently, we print the list of inferiors bound to a pspace.
 	 There can be more than one inferior bound to the same pspace,
@@ -346,14 +343,14 @@ print_program_space (struct ui_out *uiout, int requested)
 	    if (!printed_header)
 	      {
 		printed_header = 1;
-		printf_filtered ("\n\tBound inferiors: ID %d (%s)",
-				 inf->num,
-				 target_pid_to_str (ptid_t (inf->pid)).c_str ());
+		gdb_printf ("\n\tBound inferiors: ID %d (%s)",
+			    inf->num,
+			    target_pid_to_str (ptid_t (inf->pid)).c_str ());
 	      }
 	    else
-	      printf_filtered (", ID %d (%s)",
-			       inf->num,
-			       target_pid_to_str (ptid_t (inf->pid)).c_str ());
+	      gdb_printf (", ID %d (%s)",
+			  inf->num,
+			  target_pid_to_str (ptid_t (inf->pid)).c_str ());
 	  }
 
       uiout->text ("\n");
@@ -411,17 +408,17 @@ update_address_spaces (void)
 
   if (shared_aspace)
     {
-      struct address_space *aspace = new_address_space ();
+      struct address_space *aspace = new address_space ();
 
-      free_address_space (current_program_space->aspace);
+      delete current_program_space->aspace;
       for (struct program_space *pspace : program_spaces)
 	pspace->aspace = aspace;
     }
   else
     for (struct program_space *pspace : program_spaces)
       {
-	free_address_space (pspace->aspace);
-	pspace->aspace = new_address_space ();
+	delete pspace->aspace;
+	pspace->aspace = new address_space ();
       }
 
   for (inferior *inf : all_inferiors ())
@@ -459,5 +456,5 @@ initialize_progspace (void)
      modules have done that.  Do this before
      initialize_current_architecture, because that accesses the ebfd
      of current_program_space.  */
-  current_program_space = new program_space (new_address_space ());
+  current_program_space = new program_space (new address_space ());
 }

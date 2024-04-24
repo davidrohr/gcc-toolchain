@@ -1,7 +1,6 @@
 #as: -J
 #objdump: -dw
 #name: i386 intel (AT&T disassembly)
-#warning_output: intel.e
 
 .*: +file format .*
 
@@ -102,7 +101,7 @@ Disassembly of section .text:
 [ 	]*[a-f0-9]+:	60 [ 	]*pusha
 [ 	]*[a-f0-9]+:	61 [ 	]*popa
 [ 	]*[a-f0-9]+:	62 90 90 90 90 90 [ 	]*bound  %edx,-0x6f6f6f70\(%eax\)
-[ 	]*[a-f0-9]+:	63 90 90 90 90 90 [ 	]*arpl   %dx,-0x6f6f6f70\(%eax\)
+[ 	]*[a-f0-9]+:	63 90 90 90 90 90 [ 	]*arpl   %edx,-0x6f6f6f70\(%eax\)
 [ 	]*[a-f0-9]+:	68 90 90 90 90 [ 	]*push   \$0x90909090
 [ 	]*[a-f0-9]+:	69 90 90 90 90 90 90 90 90 90 [ 	]*imul   \$0x90909090,-0x6f6f6f70\(%eax\),%edx
 [ 	]*[a-f0-9]+:	6a 90 [ 	]*push   \$0xffffff90
@@ -208,8 +207,8 @@ Disassembly of section .text:
 [ 	]*[a-f0-9]+:	cd 90 [ 	]*int    \$0x90
 [ 	]*[a-f0-9]+:	ce [ 	]*into
 [ 	]*[a-f0-9]+:	cf [ 	]*iret
-[ 	]*[a-f0-9]+:	d0 90 90 90 90 90 [ 	]*rclb   -0x6f6f6f70\(%eax\)
-[ 	]*[a-f0-9]+:	d1 90 90 90 90 90 [ 	]*rcll   -0x6f6f6f70\(%eax\)
+[ 	]*[a-f0-9]+:	d0 90 90 90 90 90 [ 	]*rclb   \$1,-0x6f6f6f70\(%eax\)
+[ 	]*[a-f0-9]+:	d1 90 90 90 90 90 [ 	]*rcll   \$1,-0x6f6f6f70\(%eax\)
 [ 	]*[a-f0-9]+:	d2 90 90 90 90 90 [ 	]*rclb   %cl,-0x6f6f6f70\(%eax\)
 [ 	]*[a-f0-9]+:	d3 90 90 90 90 90 [ 	]*rcll   %cl,-0x6f6f6f70\(%eax\)
 [ 	]*[a-f0-9]+:	d4 90 [ 	]*aam    \$0x90
@@ -527,7 +526,7 @@ Disassembly of section .text:
 [ 	]*[a-f0-9]+:	66 ca 90 90 [ 	]*lretw  \$0x9090
 [ 	]*[a-f0-9]+:	66 cb [ 	]*lretw
 [ 	]*[a-f0-9]+:	66 cf [ 	]*iretw
-[ 	]*[a-f0-9]+:	66 d1 90 90 90 90 90 [ 	]*rclw   -0x6f6f6f70\(%eax\)
+[ 	]*[a-f0-9]+:	66 d1 90 90 90 90 90 [ 	]*rclw   \$1,-0x6f6f6f70\(%eax\)
 [ 	]*[a-f0-9]+:	66 d3 90 90 90 90 90 [ 	]*rclw   %cl,-0x6f6f6f70\(%eax\)
 [ 	]*[a-f0-9]+:	66 e5 90 [ 	]*in     \$0x90,%ax
 [ 	]*[a-f0-9]+:	66 e7 90 [ 	]*out    %ax,\$0x90
@@ -634,7 +633,6 @@ Disassembly of section .text:
 [ 	]*[a-f0-9]+:	b3 47 [ 	]*mov    \$0x47,%bl
 [ 	]*[a-f0-9]+:	0f ad d0 [ 	]*shrd   %cl,%edx,%eax
 [ 	]*[a-f0-9]+:	0f a5 d0 [ 	]*shld   %cl,%edx,%eax
-[ 	]*[a-f0-9]+:	de c1                	faddp  %st,%st\(1\)
 [ 	]*[a-f0-9]+:	d8 c3                	fadd   %st\(3\),%st
 [ 	]*[a-f0-9]+:	d8 c3                	fadd   %st\(3\),%st
 [ 	]*[a-f0-9]+:	dc c3                	fadd   %st,%st\(3\)
@@ -643,7 +641,6 @@ Disassembly of section .text:
 [ 	]*[a-f0-9]+:	de c1                	faddp  %st,%st\(1\)
 [ 	]*[a-f0-9]+:	de c3                	faddp  %st,%st\(3\)
 [ 	]*[a-f0-9]+:	de c3                	faddp  %st,%st\(3\)
-[ 	]*[a-f0-9]+:	de f9                	fdivrp %st,%st\(1\)
 [ 	]*[a-f0-9]+:	d8 f3                	fdiv   %st\(3\),%st
 [ 	]*[a-f0-9]+:	d8 f3                	fdiv   %st\(3\),%st
 [ 	]*[a-f0-9]+:	dc fb                	fdivr  %st,%st\(3\)
@@ -653,7 +650,6 @@ Disassembly of section .text:
 [ 	]*[a-f0-9]+:	de fb                	fdivrp %st,%st\(3\)
 [ 	]*[a-f0-9]+:	de fb                	fdivrp %st,%st\(3\)
 [ 	]*[a-f0-9]+:	d8 f3                	fdiv   %st\(3\),%st
-[ 	]*[a-f0-9]+:	de f1                	fdivp  %st,%st\(1\)
 [ 	]*[a-f0-9]+:	d8 fb                	fdivr  %st\(3\),%st
 [ 	]*[a-f0-9]+:	d8 fb                	fdivr  %st\(3\),%st
 [ 	]*[a-f0-9]+:	dc f3                	fdiv   %st,%st\(3\)
@@ -663,7 +659,6 @@ Disassembly of section .text:
 [ 	]*[a-f0-9]+:	de f3                	fdivp  %st,%st\(3\)
 [ 	]*[a-f0-9]+:	de f3                	fdivp  %st,%st\(3\)
 [ 	]*[a-f0-9]+:	d8 fb                	fdivr  %st\(3\),%st
-[ 	]*[a-f0-9]+:	de c9                	fmulp  %st,%st\(1\)
 [ 	]*[a-f0-9]+:	d8 cb                	fmul   %st\(3\),%st
 [ 	]*[a-f0-9]+:	d8 cb                	fmul   %st\(3\),%st
 [ 	]*[a-f0-9]+:	dc cb                	fmul   %st,%st\(3\)
@@ -672,8 +667,6 @@ Disassembly of section .text:
 [ 	]*[a-f0-9]+:	de c9                	fmulp  %st,%st\(1\)
 [ 	]*[a-f0-9]+:	de cb                	fmulp  %st,%st\(3\)
 [ 	]*[a-f0-9]+:	de cb                	fmulp  %st,%st\(3\)
-[ 	]*[a-f0-9]+:	de e9                	fsubrp %st,%st\(1\)
-[ 	]*[a-f0-9]+:	de e1                	fsubp  %st,%st\(1\)
 [ 	]*[a-f0-9]+:	d8 e3                	fsub   %st\(3\),%st
 [ 	]*[a-f0-9]+:	d8 e3                	fsub   %st\(3\),%st
 [ 	]*[a-f0-9]+:	dc eb                	fsubr  %st,%st\(3\)
@@ -698,6 +691,14 @@ Disassembly of section .text:
 [ 	]*[a-f0-9]+:	0f 4b 90 90 90 90 90 	cmovnp -0x6f6f6f70\(%eax\),%edx
 [ 	]*[a-f0-9]+:	66 0f 4a 90 90 90 90 90 	cmovp  -0x6f6f6f70\(%eax\),%dx
 [ 	]*[a-f0-9]+:	66 0f 4b 90 90 90 90 90 	cmovnp -0x6f6f6f70\(%eax\),%dx
+[ 	]*[a-f0-9]+:	0f 02 c0             	lar    %eax,%eax
+[ 	]*[a-f0-9]+:	66 0f 02 c0          	lar    %ax,%ax
+[ 	]*[a-f0-9]+:	0f 02 00             	lar    \(%eax\),%eax
+[ 	]*[a-f0-9]+:	66 0f 02 00          	lar    \(%eax\),%ax
+[ 	]*[a-f0-9]+:	0f 03 c0             	lsl    %eax,%eax
+[ 	]*[a-f0-9]+:	66 0f 03 c0          	lsl    %ax,%ax
+[ 	]*[a-f0-9]+:	0f 03 00             	lsl    \(%eax\),%eax
+[ 	]*[a-f0-9]+:	66 0f 03 00          	lsl    \(%eax\),%ax
 [ 	]*[a-f0-9]+:	8b 04 04             	mov    \(%esp,%eax(,1)?\),%eax
 [ 	]*[a-f0-9]+:	8b 04 20             	mov    \(%eax(,%eiz)?(,1)?\),%eax
 [ 	]*[a-f0-9]+:	c4 e2 69 92 04 08    	vgatherdps %xmm2,\(%eax,%xmm1(,1)?\),%xmm0

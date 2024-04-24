@@ -1,5 +1,5 @@
 dnl Autoconf configure snippets for common.
-dnl Copyright (C) 1995-2022 Free Software Foundation, Inc.
+dnl Copyright (C) 1995-2023 Free Software Foundation, Inc.
 dnl
 dnl This file is part of GDB.
 dnl 
@@ -51,6 +51,8 @@ AC_DEFUN([GDB_AC_COMMON], [
 
   AC_FUNC_MMAP
   AC_FUNC_FORK
+  # Some systems (e.g. Solaris) have `socketpair' in libsocket.
+  AC_SEARCH_LIBS(socketpair, socket)
   AC_CHECK_FUNCS([fdwalk getrlimit pipe pipe2 poll socketpair sigaction \
 		  ptrace64 sbrk setns sigaltstack sigprocmask \
 		  setpgid setpgrp getrusage getauxval sigtimedwait])
@@ -93,27 +95,37 @@ AC_DEFUN([GDB_AC_COMMON], [
   # mingw and DJGPP.
   AC_LANG_PUSH([C++])
   AX_PTHREAD([threads=yes], [threads=no])
-  if test "$threads" = "yes"; then
-    save_LIBS="$LIBS"
-    LIBS="$PTHREAD_LIBS $LIBS"
-    save_CXXFLAGS="$CXXFLAGS"
-    CXXFLAGS="$PTHREAD_CFLAGS $save_CXXFLAGS"
-    AC_CACHE_CHECK([for std::thread],
-		   gdb_cv_cxx_std_thread,
-		   [AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
-    [[#include <thread>
-      void callback() { }]],
-    [[std::thread t(callback);]])],
-				  gdb_cv_cxx_std_thread=yes,
-				  gdb_cv_cxx_std_thread=no)])
+  save_LIBS="$LIBS"
+  LIBS="$PTHREAD_LIBS $LIBS"
+  save_CXXFLAGS="$CXXFLAGS"
+  CXXFLAGS="$PTHREAD_CFLAGS $save_CXXFLAGS"
+  AC_CACHE_CHECK([for std::thread],
+		 gdb_cv_cxx_std_thread,
+		 [AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
+  dnl NOTE: this must be kept in sync with common-defs.h.
+  [[#if defined (__MINGW32__) || defined (__CYGWIN__)
+    # ifdef _WIN32_WINNT
+    #  if _WIN32_WINNT < 0x0501
+    #   undef _WIN32_WINNT
+    #   define _WIN32_WINNT 0x0501
+    #  endif
+    # else
+    #  define _WIN32_WINNT 0x0501
+    # endif
+    #endif	/* __MINGW32__ || __CYGWIN__ */
+    #include <thread>
+    void callback() { }]],
+  [[std::thread t(callback);]])],
+				gdb_cv_cxx_std_thread=yes,
+				gdb_cv_cxx_std_thread=no)])
 
+  if test "$threads" = "yes"; then
     # This check must be here, while LIBS includes any necessary
     # threading library.
     AC_CHECK_FUNCS([pthread_sigmask pthread_setname_np])
-
-    LIBS="$save_LIBS"
-    CXXFLAGS="$save_CXXFLAGS"
   fi
+  LIBS="$save_LIBS"
+  CXXFLAGS="$save_CXXFLAGS"
 
   if test "$want_threading" = "yes"; then
     if test "$gdb_cv_cxx_std_thread" = "yes"; then
@@ -216,4 +228,56 @@ AC_DEFUN([GDB_AC_COMMON], [
     BFD_HAVE_SYS_PROCFS_TYPE(psaddr_t)
     BFD_HAVE_SYS_PROCFS_TYPE(elf_fpregset_t)
   fi
+
+  dnl xxhash support
+  # Check for xxhash
+  AC_ARG_WITH(xxhash,
+    AS_HELP_STRING([--with-xxhash], [use libxxhash for hashing (faster) (auto/yes/no)]),
+    [], [with_xxhash=auto])
+
+  if test "x$with_xxhash" != "xno"; then
+    AC_LIB_HAVE_LINKFLAGS([xxhash], [],
+			  [#include <xxhash.h>],
+			  [XXH32("foo", 3, 0);
+			  ])
+    if test "$HAVE_LIBXXHASH" != yes; then
+      if test "$with_xxhash" = yes; then
+	AC_MSG_ERROR([xxhash is missing or unusable])
+      fi
+    fi
+    if test "x$with_xxhash" = "xauto"; then
+      with_xxhash="$HAVE_LIBXXHASH"
+    fi
+  fi
+
+  AC_MSG_CHECKING([whether to use xxhash])
+  AC_MSG_RESULT([$with_xxhash])
 ])
+
+dnl Check that the provided value ($1) is either "yes" or "no".  If not,
+dnl emit an error message mentionning the configure option $2, and abort
+dnl the script.
+AC_DEFUN([GDB_CHECK_YES_NO_VAL],
+	 [
+	   case $1 in
+	     yes | no)
+	       ;;
+	     *)
+	       AC_MSG_ERROR([bad value $1 for $2])
+	       ;;
+	   esac
+	  ])
+
+dnl Check that the provided value ($1) is either "yes", "no" or "auto".  If not,
+dnl emit an error message mentionning the configure option $2, and abort
+dnl the script.
+AC_DEFUN([GDB_CHECK_YES_NO_AUTO_VAL],
+	 [
+	   case $1 in
+	     yes | no | auto)
+	       ;;
+	     *)
+	       AC_MSG_ERROR([bad value $1 for $2])
+	       ;;
+	   esac
+	  ])

@@ -1,6 +1,6 @@
 /* Remote notification in GDB protocol
 
-   Copyright (C) 1988-2022 Free Software Foundation, Inc.
+   Copyright (C) 1988-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -46,7 +46,7 @@ bool notif_debug = false;
 
 /* Supported clients of notifications.  */
 
-static struct notif_client *notifs[] =
+static const notif_client *const notifs[] =
 {
   &notif_client_stop,
 };
@@ -58,13 +58,13 @@ gdb_static_assert (ARRAY_SIZE (notifs) == REMOTE_NOTIF_LAST);
 
 void
 remote_notif_ack (remote_target *remote,
-		  struct notif_client *nc, const char *buf)
+		  const notif_client *nc, const char *buf)
 {
   notif_event_up event = nc->alloc_event ();
 
   if (notif_debug)
-    fprintf_unfiltered (gdb_stdlog, "notif: ack '%s'\n",
-			nc->ack_command);
+    gdb_printf (gdb_stdlog, "notif: ack '%s'\n",
+		nc->ack_command);
 
   nc->parse (remote, nc, buf, event.get ());
   nc->ack (remote, nc, buf, event.release ());
@@ -74,12 +74,12 @@ remote_notif_ack (remote_target *remote,
 
 struct notif_event *
 remote_notif_parse (remote_target *remote,
-		    struct notif_client *nc, const char *buf)
+		    const notif_client *nc, const char *buf)
 {
   notif_event_up event = nc->alloc_event ();
 
   if (notif_debug)
-    fprintf_unfiltered (gdb_stdlog, "notif: parse '%s'\n", nc->name);
+    gdb_printf (gdb_stdlog, "notif: parse '%s'\n", nc->name);
 
   nc->parse (remote, nc, buf, event.get ());
 
@@ -91,11 +91,11 @@ remote_notif_parse (remote_target *remote,
 
 void
 remote_notif_process (struct remote_notif_state *state,
-		      struct notif_client *except)
+		      const notif_client *except)
 {
   while (!state->notif_queue.empty ())
     {
-      struct notif_client *nc = state->notif_queue.front ();
+      const notif_client *nc = state->notif_queue.front ();
       state->notif_queue.pop_front ();
 
       gdb_assert (nc != except);
@@ -120,7 +120,7 @@ remote_async_get_pending_events_handler (gdb_client_data data)
 void
 handle_notification (struct remote_notif_state *state, const char *buf)
 {
-  struct notif_client *nc;
+  const notif_client *nc;
   size_t i;
 
   for (i = 0; i < ARRAY_SIZE (notifs); i++)
@@ -145,8 +145,8 @@ handle_notification (struct remote_notif_state *state, const char *buf)
 	 reason thought we didn't, possibly due to timeout on its side.
 	 Just ignore it.  */
       if (notif_debug)
-	fprintf_unfiltered (gdb_stdlog,
-			    "notif: ignoring resent notification\n");
+	gdb_printf (gdb_stdlog,
+		    "notif: ignoring resent notification\n");
     }
   else
     {
@@ -202,9 +202,9 @@ handle_notification (struct remote_notif_state *state, const char *buf)
 	}
 
       if (notif_debug)
-	fprintf_unfiltered (gdb_stdlog,
-			    "notif: Notification '%s' captured\n",
-			    nc->name);
+	gdb_printf (gdb_stdlog,
+		    "notif: Notification '%s' captured\n",
+		    nc->name);
     }
 }
 

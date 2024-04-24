@@ -1,6 +1,6 @@
 /* Interface between GDB and target environments, including files and processes
 
-   Copyright (C) 1990-2022 Free Software Foundation, Inc.
+   Copyright (C) 1990-2023 Free Software Foundation, Inc.
 
    Contributed by Cygnus Support.  Written by John Gilmore.
 
@@ -39,8 +39,12 @@ struct expression;
 struct dcache_struct;
 struct inferior;
 
-#include "infrun.h" /* For enum exec_direction_kind.  */
-#include "breakpoint.h" /* For enum bptype.  */
+/* Define const gdb_byte using one identifier, to make it easy for
+   make-target-delegates.py to parse.  */
+typedef const gdb_byte const_gdb_byte;
+
+#include "infrun.h"
+#include "breakpoint.h"
 #include "gdbsupport/scoped_restore.h"
 #include "gdbsupport/refcounted-object.h"
 #include "target-section.h"
@@ -79,10 +83,12 @@ struct inferior;
 #include "btrace.h"
 #include "record.h"
 #include "command.h"
-#include "disasm.h"
+#include "disasm-flags.h"
 #include "tracepoint.h"
+#include "gdbsupport/fileio.h"
+#include "gdbsupport/x86-xstate.h"
 
-#include "gdbsupport/break-common.h" /* For enum target_hw_bp_type.  */
+#include "gdbsupport/break-common.h"
 
 enum strata
   {
@@ -678,8 +684,8 @@ struct target_ops
 						       inferior *inf)
       TARGET_DEFAULT_RETURN (NULL);
     /* See target_thread_info_to_thread_handle.  */
-    virtual gdb::byte_vector thread_info_to_thread_handle (struct thread_info *)
-      TARGET_DEFAULT_RETURN (gdb::byte_vector ());
+    virtual gdb::array_view<const_gdb_byte> thread_info_to_thread_handle (struct thread_info *)
+      TARGET_DEFAULT_RETURN (gdb::array_view<const gdb_byte> ());
     virtual void stop (ptid_t)
       TARGET_DEFAULT_IGNORE ();
     virtual void interrupt ()
@@ -688,7 +694,7 @@ struct target_ops
       TARGET_DEFAULT_FUNC (default_target_pass_ctrlc);
     virtual void rcmd (const char *command, struct ui_file *output)
       TARGET_DEFAULT_FUNC (default_rcmd);
-    virtual char *pid_to_exec_file (int pid)
+    virtual const char *pid_to_exec_file (int pid)
       TARGET_DEFAULT_RETURN (NULL);
     virtual void log_command (const char *)
       TARGET_DEFAULT_IGNORE ();
@@ -713,7 +719,7 @@ struct target_ops
       TARGET_DEFAULT_RETURN (false);
     virtual bool is_async_p ()
       TARGET_DEFAULT_RETURN (false);
-    virtual void async (int)
+    virtual void async (bool)
       TARGET_DEFAULT_NORETURN (tcomplain ());
     virtual int async_wait_fd ()
       TARGET_DEFAULT_NORETURN (noprocess ());
@@ -861,8 +867,8 @@ struct target_ops
        Return 0 if *READPTR is already at the end of the buffer.
        Return -1 if there is insufficient buffer for a whole entry.
        Return 1 if an entry was read into *TYPEP and *VALP.  */
-    virtual int auxv_parse (gdb_byte **readptr,
-			    gdb_byte *endptr, CORE_ADDR *typep, CORE_ADDR *valp)
+    virtual int auxv_parse (const gdb_byte **readptr,
+			    const gdb_byte *endptr, CORE_ADDR *typep, CORE_ADDR *valp)
       TARGET_DEFAULT_FUNC (default_auxv_parse);
 
     /* Search SEARCH_SPACE_LEN bytes beginning at START_ADDR for the
@@ -952,28 +958,28 @@ struct target_ops
        *TARGET_ERRNO).  */
     virtual int fileio_open (struct inferior *inf, const char *filename,
 			     int flags, int mode, int warn_if_slow,
-			     int *target_errno);
+			     fileio_error *target_errno);
 
     /* Write up to LEN bytes from WRITE_BUF to FD on the target.
        Return the number of bytes written, or -1 if an error occurs
        (and set *TARGET_ERRNO).  */
     virtual int fileio_pwrite (int fd, const gdb_byte *write_buf, int len,
-			       ULONGEST offset, int *target_errno);
+			       ULONGEST offset, fileio_error *target_errno);
 
     /* Read up to LEN bytes FD on the target into READ_BUF.
        Return the number of bytes read, or -1 if an error occurs
        (and set *TARGET_ERRNO).  */
     virtual int fileio_pread (int fd, gdb_byte *read_buf, int len,
-			      ULONGEST offset, int *target_errno);
+			      ULONGEST offset, fileio_error *target_errno);
 
     /* Get information about the file opened as FD and put it in
        SB.  Return 0 on success, or -1 if an error occurs (and set
        *TARGET_ERRNO).  */
-    virtual int fileio_fstat (int fd, struct stat *sb, int *target_errno);
+    virtual int fileio_fstat (int fd, struct stat *sb, fileio_error *target_errno);
 
     /* Close FD on the target.  Return 0, or -1 if an error occurs
        (and set *TARGET_ERRNO).  */
-    virtual int fileio_close (int fd, int *target_errno);
+    virtual int fileio_close (int fd, fileio_error *target_errno);
 
     /* Unlink FILENAME on the target, in the filesystem as seen by
        INF.  If INF is NULL, use the filesystem seen by the debugger
@@ -981,7 +987,7 @@ struct target_ops
        -1 if an error occurs (and set *TARGET_ERRNO).  */
     virtual int fileio_unlink (struct inferior *inf,
 			       const char *filename,
-			       int *target_errno);
+			       fileio_error *target_errno);
 
     /* Read value of symbolic link FILENAME on the target, in the
        filesystem as seen by INF.  If INF is NULL, use the filesystem
@@ -990,7 +996,7 @@ struct target_ops
        occurs (and set *TARGET_ERRNO).  */
     virtual gdb::optional<std::string> fileio_readlink (struct inferior *inf,
 							const char *filename,
-							int *target_errno);
+							fileio_error *target_errno);
 
     /* Implement the "info proc" command.  Returns true if the target
        actually implemented the command, false otherwise.  */
@@ -1037,7 +1043,7 @@ struct target_ops
     virtual int get_trace_status (struct trace_status *ts)
       TARGET_DEFAULT_RETURN (-1);
 
-    virtual void get_tracepoint_status (struct breakpoint *tp,
+    virtual void get_tracepoint_status (tracepoint *tp,
 					struct uploaded_tp *utp)
       TARGET_DEFAULT_NORETURN (tcomplain ());
 
@@ -1320,6 +1326,10 @@ struct target_ops
     virtual bool store_memtags (CORE_ADDR address, size_t len,
 				const gdb::byte_vector &tags, int type)
       TARGET_DEFAULT_NORETURN (tcomplain ());
+
+    /* Return the x86 XSAVE extended state area layout.  */
+    virtual x86_xsave_layout fetch_x86_xsave_layout ()
+      TARGET_DEFAULT_RETURN (x86_xsave_layout ());
   };
 
 /* Deleter for std::unique_ptr.  See comments in
@@ -1336,9 +1346,6 @@ struct target_ops_deleter
 /* A unique pointer for target_ops.  */
 typedef std::unique_ptr<target_ops, target_ops_deleter> target_ops_up;
 
-/* Decref a target and close if, if there are no references left.  */
-extern void decref_target (target_ops *t);
-
 /* A policy class to interface gdb::ref_ptr with target_ops.  */
 
 struct target_ops_ref_policy
@@ -1348,10 +1355,9 @@ struct target_ops_ref_policy
     t->incref ();
   }
 
-  static void decref (target_ops *t)
-  {
-    decref_target (t);
-  }
+  /* Decrement the reference count on T, and, if the reference count
+     reaches zero, close the target.  */
+  static void decref (target_ops *t);
 };
 
 /* A gdb::ref_ptr pointer to a target_ops.  */
@@ -1384,11 +1390,11 @@ public:
   bool unpush (target_ops *t);
 
   /* Returns true if T is pushed on the target stack.  */
-  bool is_pushed (target_ops *t) const
+  bool is_pushed (const target_ops *t) const
   { return at (t->stratum ()) == t; }
 
   /* Return the target at STRATUM.  */
-  target_ops *at (strata stratum) const { return m_stack[stratum]; }
+  target_ops *at (strata stratum) const { return m_stack[stratum].get (); }
 
   /* Return the target at the top of the stack.  */
   target_ops *top () const { return at (m_top); }
@@ -1403,7 +1409,7 @@ private:
   /* The stack, represented as an array, with one slot per stratum.
      If no target is pushed at some stratum, the corresponding slot is
      null.  */
-  target_ops *m_stack[(int) debug_stratum + 1] {};
+  std::array<target_ops_ref, (int) debug_stratum + 1> m_stack;
 };
 
 /* Return the dummy target.  */
@@ -1412,15 +1418,6 @@ extern target_ops *get_dummy_target ();
 /* Define easy words for doing these operations on our current target.  */
 
 extern const char *target_shortname ();
-
-/* Does whatever cleanup is required for a target that we are no
-   longer going to be calling.  This routine is automatically always
-   called after popping the target off the target stack - the target's
-   own methods are no longer available through the target vector.
-   Closing file descriptors and freeing all memory allocated memory are
-   typical things it should do.  */
-
-void target_close (struct target_ops *targ);
 
 /* Find the correct target to use for "attach".  If a target on the
    current stack supports attaching, then it is returned.  Otherwise,
@@ -1471,23 +1468,32 @@ extern void target_detach (inferior *inf, int from_tty);
 
 extern void target_disconnect (const char *, int);
 
-/* Resume execution (or prepare for execution) of a target thread,
-   process or all processes.  STEP says whether to hardware
-   single-step or to run free; SIGGNAL is the signal to be given to
-   the target, or GDB_SIGNAL_0 for no signal.  The caller may not pass
-   GDB_SIGNAL_DEFAULT.  A specific PTID means `step/resume only this
-   process id'.  A wildcard PTID (all threads, or all threads of
-   process) means `step/resume INFERIOR_PTID, and let other threads
-   (for which the wildcard PTID matches) resume with their
-   'thread->suspend.stop_signal' signal (usually GDB_SIGNAL_0) if it
-   is in "pass" state, or with no signal if in "no pass" state.
+/* Resume execution (or prepare for execution) of the current thread
+   (INFERIOR_PTID), while optionally letting other threads of the
+   current process or all processes run free.
+
+   STEP says whether to hardware single-step the current thread or to
+   let it run free; SIGNAL is the signal to be given to the current
+   thread, or GDB_SIGNAL_0 for no signal.  The caller may not pass
+   GDB_SIGNAL_DEFAULT.
+
+   SCOPE_PTID indicates the resumption scope.  I.e., which threads
+   (other than the current) run free.  If resuming a single thread,
+   SCOPE_PTID is the same thread as the current thread.  A wildcard
+   SCOPE_PTID (all threads, or all threads of process) lets threads
+   other than the current (for which the wildcard SCOPE_PTID matches)
+   resume with their 'thread->suspend.stop_signal' signal (usually
+   GDB_SIGNAL_0) if it is in "pass" state, or with no signal if in "no
+   pass" state.  Note neither STEP nor SIGNAL apply to any thread
+   other than the current.
 
    In order to efficiently handle batches of resumption requests,
    targets may implement this method such that it records the
    resumption request, but defers the actual resumption to the
    target_commit_resume method implementation.  See
    target_commit_resume below.  */
-extern void target_resume (ptid_t ptid, int step, enum gdb_signal signal);
+extern void target_resume (ptid_t scope_ptid,
+			   int step, enum gdb_signal signal);
 
 /* Ensure that all resumed threads are committed to the target.
 
@@ -1566,14 +1572,6 @@ extern void target_dumpcore (const char *filename);
    on its end.  */
 
 extern bool target_can_run_breakpoint_commands ();
-
-/* Read a string from target memory at address MEMADDR.  The string
-   will be at most LEN bytes long (note that excess bytes may be read
-   in some cases -- but these will not be returned).  Returns nullptr
-   on error.  */
-
-extern gdb::unique_xmalloc_ptr<char> target_read_string
-  (CORE_ADDR memaddr, int len, int *bytes_read = nullptr);
 
 /* For target_read_memory see target/target.h.  */
 
@@ -1885,7 +1883,7 @@ extern bool target_can_async_p (struct target_ops *target);
 extern bool target_is_async_p ();
 
 /* Enables/disabled async target events.  */
-extern void target_async (int enable);
+extern void target_async (bool enable);
 
 /* Enables/disables thread create and exit events.  */
 extern void target_thread_events (int enable);
@@ -1935,7 +1933,7 @@ extern struct thread_info *target_thread_handle_to_thread_info
 /* Given a thread, return the thread handle, a target-specific sequence of
    bytes which serves as a thread identifier within the program being
    debugged.  */
-extern gdb::byte_vector target_thread_info_to_thread_handle
+extern gdb::array_view<const gdb_byte> target_thread_info_to_thread_handle
   (struct thread_info *);
 
 /* Attempts to find the pathname of the executable file
@@ -1950,7 +1948,7 @@ extern gdb::byte_vector target_thread_info_to_thread_handle
    the client if the string will not be immediately used, or if
    it must persist.  */
 
-extern char *target_pid_to_exec_file (int pid);
+extern const char *target_pid_to_exec_file (int pid);
 
 /* See the to_thread_architecture description in struct target_ops.  */
 
@@ -2036,7 +2034,7 @@ extern bool target_have_steppable_watchpoint ();
 
 /* Provide defaults for hardware watchpoint functions.  */
 
-/* If the *_hw_beakpoint functions have not been defined
+/* If the *_hw_breakpoint functions have not been defined
    elsewhere use the definitions in the target vector.  */
 
 /* Returns positive if we can set a hardware watchpoint of type TYPE.
@@ -2164,29 +2162,29 @@ extern bool target_filesystem_is_local ();
 extern int target_fileio_open (struct inferior *inf,
 			       const char *filename, int flags,
 			       int mode, bool warn_if_slow,
-			       int *target_errno);
+			       fileio_error *target_errno);
 
 /* Write up to LEN bytes from WRITE_BUF to FD on the target.
    Return the number of bytes written, or -1 if an error occurs
    (and set *TARGET_ERRNO).  */
 extern int target_fileio_pwrite (int fd, const gdb_byte *write_buf, int len,
-				 ULONGEST offset, int *target_errno);
+				 ULONGEST offset, fileio_error *target_errno);
 
 /* Read up to LEN bytes FD on the target into READ_BUF.
    Return the number of bytes read, or -1 if an error occurs
    (and set *TARGET_ERRNO).  */
 extern int target_fileio_pread (int fd, gdb_byte *read_buf, int len,
-				ULONGEST offset, int *target_errno);
+				ULONGEST offset, fileio_error *target_errno);
 
 /* Get information about the file opened as FD on the target
    and put it in SB.  Return 0 on success, or -1 if an error
    occurs (and set *TARGET_ERRNO).  */
 extern int target_fileio_fstat (int fd, struct stat *sb,
-				int *target_errno);
+				fileio_error *target_errno);
 
 /* Close FD on the target.  Return 0, or -1 if an error occurs
    (and set *TARGET_ERRNO).  */
-extern int target_fileio_close (int fd, int *target_errno);
+extern int target_fileio_close (int fd, fileio_error *target_errno);
 
 /* Unlink FILENAME on the target, in the filesystem as seen by INF.
    If INF is NULL, use the filesystem seen by the debugger (GDB or,
@@ -2194,7 +2192,7 @@ extern int target_fileio_close (int fd, int *target_errno);
    occurs (and set *TARGET_ERRNO).  */
 extern int target_fileio_unlink (struct inferior *inf,
 				 const char *filename,
-				 int *target_errno);
+				 fileio_error *target_errno);
 
 /* Read value of symbolic link FILENAME on the target, in the
    filesystem as seen by INF.  If INF is NULL, use the filesystem seen
@@ -2202,7 +2200,7 @@ extern int target_fileio_unlink (struct inferior *inf,
    Return a null-terminated string allocated via xmalloc, or NULL if
    an error occurs (and set *TARGET_ERRNO).  */
 extern gdb::optional<std::string> target_fileio_readlink
-    (struct inferior *inf, const char *filename, int *target_errno);
+    (struct inferior *inf, const char *filename, fileio_error *target_errno);
 
 /* Read target file FILENAME, in the filesystem as seen by INF.  If
    INF is NULL, use the filesystem seen by the debugger (GDB or, for
@@ -2257,7 +2255,7 @@ extern void target_trace_set_readonly_regions ();
 
 extern int target_get_trace_status (trace_status *ts);
 
-extern void target_get_tracepoint_status (breakpoint *tp, uploaded_tp *utp);
+extern void target_get_tracepoint_status (tracepoint *tp, uploaded_tp *utp);
 
 extern void target_trace_stop ();
 
@@ -2311,6 +2309,8 @@ extern bool target_fetch_memtags (CORE_ADDR address, size_t len,
 
 extern bool target_store_memtags (CORE_ADDR address, size_t len,
 				  const gdb::byte_vector &tags, int type);
+
+extern x86_xsave_layout target_fetch_x86_xsave_layout ();
 
 /* Command logging facility.  */
 
@@ -2390,17 +2390,6 @@ typedef std::unique_ptr<struct target_ops, target_unpusher> target_unpush_up;
 extern void target_pre_inferior (int);
 
 extern void target_preopen (int);
-
-/* Does whatever cleanup is required to get rid of all pushed targets.  */
-extern void pop_all_targets (void);
-
-/* Like pop_all_targets, but pops only targets whose stratum is at or
-   above STRATUM.  */
-extern void pop_all_targets_at_and_above (enum strata stratum);
-
-/* Like pop_all_targets, but pops only targets whose stratum is
-   strictly above ABOVE_STRATUM.  */
-extern void pop_all_targets_above (enum strata above_stratum);
 
 extern CORE_ADDR target_translate_tls_address (struct objfile *objfile,
 					       CORE_ADDR offset);
@@ -2487,6 +2476,10 @@ extern int remote_timeout;
    scoped_restore to restore it back to the current value.  */
 extern scoped_restore_tmpl<int>
     make_scoped_restore_show_memory_breakpoints (int show);
+
+/* True if we should trust readonly sections from the
+   executable when reading memory.  */
+extern bool trust_readonly;
 
 extern bool may_write_registers;
 extern bool may_write_memory;

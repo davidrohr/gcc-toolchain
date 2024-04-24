@@ -205,8 +205,8 @@ foo:
  rcl    dword ptr 0x90909090[eax]
  rcl    byte ptr 0x90909090[eax], cl
  rcl    dword ptr 0x90909090[eax], cl
- aam    0xffffff90
- aad    0xffffff90
+ aam    0x90
+ aad    0x90
  xlat   byte ptr ds:[ebx]
  fcom   dword ptr 0x90909090[eax]
  fst    dword ptr 0x90909090[eax]
@@ -632,7 +632,6 @@ rot5:
  shrd   eax, edx, cl
  shld   eax, edx, cl
 
-fadd
 fadd	st(3)
 fadd	st,st(3)
 fadd	st(3),st
@@ -641,7 +640,6 @@ fadd   QWORD PTR [ebx]
 faddp
 faddp	st(3)
 faddp	st(3),st
-fdiv
 fdiv   st(3)
 fdiv   st,st(3)
 fdiv   st(3),st
@@ -651,7 +649,6 @@ fdivp
 fdivp  st(3)
 fdivp  st(3),st
 fdiv  st,st(3)
-fdivr
 fdivr  st(3)
 fdivr  st,st(3)
 fdivr  st(3),st
@@ -661,7 +658,6 @@ fdivrp
 fdivrp st(3)
 fdivrp st(3),st
 fdivr st,st(3)
-fmul
 fmul	st(3)
 fmul	st,st(3)
 fmul	st(3),st
@@ -670,8 +666,6 @@ fmul   QWORD PTR [ebx]
 fmulp
 fmulp	st(3)
 fmulp	st(3),st
-fsub
-fsubr
 fsub   st(3)
 fsub   st,st(3)
 fsub   st(3),st
@@ -698,6 +692,16 @@ fidivr  dword ptr [ebx]
  cmovpo edx, 0x90909090[eax]
  cmovpe  dx, 0x90909090[eax]
  cmovpo dx, 0x90909090[eax]
+
+	lar	eax, eax
+	lar	ax, ax
+	lar	eax, word ptr [eax]
+	lar	ax, word ptr [eax]
+
+	lsl	eax, eax
+	lsl	ax, ax
+	lsl	eax, word ptr [eax]
+	lsl	ax, word ptr [eax]
 
  # Check base/index swapping
 	.allow_index_reg

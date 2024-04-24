@@ -1,6 +1,6 @@
 /* DWARF 2 low-level section code
 
-   Copyright (C) 1994-2022 Free Software Foundation, Inc.
+   Copyright (C) 1994-2023 Free Software Foundation, Inc.
 
    Adapted by Gary Funck (gary@intrepid.com), Intrepid Technology,
    Inc.  with support from Florida State University (under contract
@@ -182,7 +182,7 @@ dwarf2_section_info::read (struct objfile *objfile)
   gdb_assert (abfd != NULL);
 
   if (bfd_seek (abfd, sectp->filepos, SEEK_SET) != 0
-      || bfd_bread (buf, size, abfd) != size)
+      || bfd_read (buf, size, abfd) != size)
     {
       error (_("Dwarf Error: Can't read DWARF data"
 	       " in section %s [in module %s]"),

@@ -1,5 +1,5 @@
 /* YACC parser for Ada expressions, for GDB.
-   Copyright (C) 1986-2022 Free Software Foundation, Inc.
+   Copyright (C) 1986-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -42,9 +42,6 @@
 #include "parser-defs.h"
 #include "language.h"
 #include "ada-lang.h"
-#include "bfd.h" /* Required by objfiles.h.  */
-#include "symfile.h" /* Required by objfiles.h.  */
-#include "objfiles.h" /* For have_full_symbols and have_partial_symbols */
 #include "frame.h"
 #include "block.h"
 #include "ada-exp.h"
@@ -68,6 +65,14 @@ struct name_info {
 
 static struct parser_state *pstate = NULL;
 
+/* The original expression string.  */
+static const char *original_expr;
+
+/* We don't have a good way to manage non-POD data in Yacc, so store
+   values here.  The storage here is only valid for the duration of
+   the parse.  */
+static std::vector<std::unique_ptr<gdb_mpz>> int_storage;
+
 int yyparse (void);
 
 static int yylex (void);
@@ -82,6 +87,9 @@ static void write_object_renaming (struct parser_state *,
 
 static struct type* write_var_or_type (struct parser_state *,
 				       const struct block *, struct stoken);
+static struct type *write_var_or_type_completion (struct parser_state *,
+						  const struct block *,
+						  struct stoken);
 
 static void write_name_assoc (struct parser_state *, struct stoken);
 
@@ -90,19 +98,11 @@ static const struct block *block_lookup (const struct block *, const char *);
 static void write_ambiguous_var (struct parser_state *,
 				 const struct block *, const char *, int);
 
-static struct type *type_int (struct parser_state *);
-
-static struct type *type_long (struct parser_state *);
-
-static struct type *type_long_long (struct parser_state *);
-
-static struct type *type_long_double (struct parser_state *);
-
 static struct type *type_for_char (struct parser_state *, ULONGEST);
 
-static struct type *type_boolean (struct parser_state *);
-
 static struct type *type_system_address (struct parser_state *);
+
+static std::string find_completion_bounds (struct parser_state *);
 
 using namespace expr;
 
@@ -295,7 +295,7 @@ ada_funcall (int nargs)
       struct value *callee_v = callee->evaluate (nullptr,
 						 pstate->expout.get (),
 						 EVAL_AVOID_SIDE_EFFECTS);
-      callee_t = ada_check_typedef (value_type (callee_v));
+      callee_t = ada_check_typedef (callee_v->type ());
       array_arity = ada_array_arity (callee_t);
     }
 
@@ -334,9 +334,7 @@ static ada_choices_component *
 choice_component ()
 {
   ada_component *last = components.back ().get ();
-  ada_choices_component *result = dynamic_cast<ada_choices_component *> (last);
-  gdb_assert (result != nullptr);
-  return result;
+  return gdb::checked_static_cast<ada_choices_component *> (last);
 }
 
 /* Pop the most recent component from the global stack, and return
@@ -393,15 +391,50 @@ pop_associations (int n)
   return result;
 }
 
+/* Expression completer for attributes.  */
+struct ada_tick_completer : public expr_completion_base
+{
+  explicit ada_tick_completer (std::string &&name)
+    : m_name (std::move (name))
+  {
+  }
+
+  bool complete (struct expression *exp,
+		 completion_tracker &tracker) override;
+
+private:
+
+  std::string m_name;
+};
+
+/* Make a new ada_tick_completer and wrap it in a unique pointer.  */
+static std::unique_ptr<expr_completion_base>
+make_tick_completer (struct stoken tok)
+{
+  return (std::unique_ptr<expr_completion_base>
+	  (new ada_tick_completer (std::string (tok.ptr, tok.length))));
+}
+
+/* A convenience typedef.  */
+typedef std::unique_ptr<ada_assign_operation> ada_assign_up;
+
+/* The stack of currently active assignment expressions.  This is used
+   to implement '@', the target name symbol.  */
+static std::vector<ada_assign_up> assignments;
+
 %}
 
 %union
   {
     LONGEST lval;
     struct {
-      LONGEST val;
+      const gdb_mpz *val;
       struct type *type;
     } typed_val;
+    struct {
+      LONGEST val;
+      struct type *type;
+    } typed_char;
     struct {
       gdb_byte val[16];
       struct type *type;
@@ -416,15 +449,14 @@ pop_associations (int n)
 %type <lval> aggregate_component_list 
 %type <tval> var_or_type type_prefix opt_type_prefix
 
-%token <typed_val> INT NULL_PTR CHARLIT
+%token <typed_val> INT NULL_PTR
+%token <typed_char> CHARLIT
 %token <typed_val_float> FLOAT
 %token TRUEKEYWORD FALSEKEYWORD
 %token COLONCOLON
-%token <sval> STRING NAME DOT_ID 
+%token <sval> STRING NAME DOT_ID TICK_COMPLETE DOT_COMPLETE NAME_COMPLETE
 %type <bval> block
 %type <lval> arglist tick_arglist
-
-%token DOT_ALL
 
 /* Special type cases, put in to allow the parser to distinguish different
    legal basetypes.  */
@@ -449,10 +481,11 @@ pop_associations (int n)
 %right TICK_ACCESS TICK_ADDRESS TICK_FIRST TICK_LAST TICK_LENGTH
 %right TICK_MAX TICK_MIN TICK_MODULUS
 %right TICK_POS TICK_RANGE TICK_SIZE TICK_TAG TICK_VAL
+%right TICK_COMPLETE TICK_ENUM_REP TICK_ENUM_VAL
  /* The following are right-associative only so that reductions at this
     precedence have lower precedence than '.' and '('.  The syntax still
     forces a.b.c, e.g., to be LEFT-associated.  */
-%right '.' '(' '[' DOT_ID DOT_ALL
+%right '.' '(' '[' DOT_ID DOT_COMPLETE
 
 %token NEW OTHERS
 
@@ -466,30 +499,54 @@ start   :	exp1
 exp1	:	exp
 	|	exp1 ';' exp
 			{ ada_wrap2<comma_operation> (BINOP_COMMA); }
-	| 	primary ASSIGN exp   /* Extension for convenience */
+	| 	primary ASSIGN
 			{
+			  assignments.emplace_back
+			    (new ada_assign_operation (ada_pop (), nullptr));
+			}
+		exp   /* Extension for convenience */
+			{
+			  ada_assign_up assign
+			    = std::move (assignments.back ());
+			  assignments.pop_back ();
+			  value *lhs_val = (assign->eval_for_resolution
+					    (pstate->expout.get ()));
+
 			  operation_up rhs = pstate->pop ();
-			  operation_up lhs = ada_pop ();
-			  value *lhs_val
-			    = lhs->evaluate (nullptr, pstate->expout.get (),
-					     EVAL_AVOID_SIDE_EFFECTS);
 			  rhs = resolve (std::move (rhs), true,
-					 value_type (lhs_val));
-			  pstate->push_new<ada_assign_operation>
-			    (std::move (lhs), std::move (rhs));
+					 lhs_val->type ());
+
+			  assign->set_rhs (std::move (rhs));
+			  pstate->push (std::move (assign));
 			}
 	;
 
 /* Expressions, not including the sequencing operator.  */
-primary :	primary DOT_ALL
-			{ ada_wrap<ada_unop_ind_operation> (); }
-	;
 
 primary :	primary DOT_ID
 			{
+			  if (strcmp ($2.ptr, "all") == 0)
+			    ada_wrap<ada_unop_ind_operation> ();
+			  else
+			    {
+			      operation_up arg = ada_pop ();
+			      pstate->push_new<ada_structop_operation>
+				(std::move (arg), copy_name ($2));
+			    }
+			}
+	;
+
+primary :	primary DOT_COMPLETE
+			{
+			  /* This is done even for ".all", because
+			     that might be a prefix.  */
 			  operation_up arg = ada_pop ();
-			  pstate->push_new<ada_structop_operation>
-			    (std::move (arg), copy_name ($2));
+			  ada_structop_operation *str_op
+			    = (new ada_structop_operation
+			       (std::move (arg), copy_name ($2)));
+			  str_op->set_prefix (find_completion_bounds (pstate));
+			  pstate->push (operation_up (str_op));
+			  pstate->mark_struct_expression (str_op);
 			}
 	;
 
@@ -559,6 +616,17 @@ primary :     	aggregate
 			    (pop_component ());
 			}
 	;        
+
+primary :	'@'
+			{
+			  if (assignments.empty ())
+			    error (_("the target name symbol ('@') may only "
+				     "appear in an assignment context"));
+			  ada_assign_operation *current
+			    = assignments.back ().get ();
+			  pstate->push_new<ada_target_operation> (current);
+			}
+	;
 
 simple_exp : 	primary
 	;
@@ -784,6 +852,10 @@ primary :	primary TICK_ACCESS
 			{ ada_addrof (); }
 	|	primary TICK_ADDRESS
 			{ ada_addrof (type_system_address (pstate)); }
+	|	primary TICK_COMPLETE
+			{
+			  pstate->mark_completion (make_tick_completer ($2));
+			}
 	|	primary TICK_FIRST tick_arglist
 			{
 			  operation_up arg = ada_pop ();
@@ -818,20 +890,32 @@ primary :	primary TICK_ACCESS
 			  pstate->push_new<ada_atr_val_operation>
 			    ($1, std::move (arg));
 			}
+	|	type_prefix TICK_ENUM_REP '(' exp ')'
+			{
+			  operation_up arg = ada_pop (true, $1);
+			  pstate->push_new<ada_atr_enum_rep_operation>
+			    ($1, std::move (arg));
+			}
+	|	type_prefix TICK_ENUM_VAL '(' exp ')'
+			{
+			  operation_up arg = ada_pop (true, $1);
+			  pstate->push_new<ada_atr_enum_val_operation>
+			    ($1, std::move (arg));
+			}
 	|	type_prefix TICK_MODULUS
 			{
 			  struct type *type_arg = check_typedef ($1);
 			  if (!ada_is_modular_type (type_arg))
 			    error (_("'modulus must be applied to modular type"));
 			  write_int (pstate, ada_modulus (type_arg),
-				     TYPE_TARGET_TYPE (type_arg));
+				     type_arg->target_type ());
 			}
 	;
 
 tick_arglist :			%prec '('
 			{ $$ = 1; }
 	| 	'(' INT ')'
-			{ $$ = $2.val; }
+			{ $$ = $2.val->as_integer<LONGEST> (); }
 	;
 
 type_prefix :
@@ -852,7 +936,10 @@ opt_type_prefix :
 
 
 primary	:	INT
-			{ write_int (pstate, (LONGEST) $1.val, $1.type); }
+			{
+			  pstate->push_new<long_const_operation> ($1.type, *$1.val);
+			  ada_wrap<ada_wrapped_operation> ();
+			}
 	;
 
 primary	:	CHARLIT
@@ -888,9 +975,15 @@ primary	:	STRING
 	;
 
 primary :	TRUEKEYWORD
-			{ write_int (pstate, 1, type_boolean (pstate)); }
+			{
+			  write_int (pstate, 1,
+				     parse_type (pstate)->builtin_bool);
+			}
 	|	FALSEKEYWORD
-			{ write_int (pstate, 0, type_boolean (pstate)); }
+			{
+			  write_int (pstate, 0,
+				     parse_type (pstate)->builtin_bool);
+			}
 	;
 
 primary	: 	NEW NAME
@@ -899,8 +992,20 @@ primary	: 	NEW NAME
 
 var_or_type:	NAME   	    %prec VAR
 				{ $$ = write_var_or_type (pstate, NULL, $1); }
+	|	NAME_COMPLETE %prec VAR
+				{
+				  $$ = write_var_or_type_completion (pstate,
+								     NULL,
+								     $1);
+				}
 	|	block NAME  %prec VAR
 				{ $$ = write_var_or_type (pstate, $1, $2); }
+	|	block NAME_COMPLETE  %prec VAR
+				{
+				  $$ = write_var_or_type_completion (pstate,
+								     $1,
+								     $2);
+				}
 	|       NAME TICK_ACCESS 
 			{ 
 			  $$ = write_var_or_type (pstate, NULL, $1);
@@ -1080,12 +1185,18 @@ ada_parse (struct parser_state *par_state)
   scoped_restore pstate_restore = make_scoped_restore (&pstate);
   gdb_assert (par_state != NULL);
   pstate = par_state;
+  original_expr = par_state->lexptr;
+
+  scoped_restore restore_yydebug = make_scoped_restore (&yydebug,
+							par_state->debug);
 
   lexer_init (yyin);		/* (Re-)initialize lexer.  */
   obstack_free (&temp_parse_space, NULL);
   obstack_init (&temp_parse_space);
   components.clear ();
   associations.clear ();
+  int_storage.clear ();
+  assignments.clear ();
 
   int result = yyparse ();
   if (!result)
@@ -1206,7 +1317,7 @@ write_object_renaming (struct parser_state *par_state,
 	    if (next == renaming_expr)
 	      goto BadEncoding;
 	    renaming_expr = next;
-	    write_int (par_state, val, type_int (par_state));
+	    write_int (par_state, val, parse_type (par_state)->builtin_int);
 	  }
 	else
 	  {
@@ -1302,7 +1413,7 @@ block_lookup (const struct block *context, const char *raw_name)
     symtab = NULL;
 
   if (symtab != NULL)
-    result = BLOCKVECTOR_BLOCK (symtab->blockvector (), STATIC_BLOCK);
+    result = symtab->compunit ()->blockvector ()->static_block ();
   else if (syms.empty () || syms[0].symbol->aclass () != LOC_BLOCK)
     {
       if (context == NULL)
@@ -1314,7 +1425,7 @@ block_lookup (const struct block *context, const char *raw_name)
     {
       if (syms.size () > 1)
 	warning (_("Function name \"%s\" ambiguous here"), raw_name);
-      result = SYMBOL_BLOCK_VALUE (syms[0].symbol);
+      result = syms[0].symbol->value_block ();
     }
 
   return result;
@@ -1408,10 +1519,12 @@ chop_separator (const char *name)
 
 /* Given that SELS is a string of the form (<sep><identifier>)*, where
    <sep> is '__' or '.', write the indicated sequence of
-   STRUCTOP_STRUCT expression operators. */
-static void
+   STRUCTOP_STRUCT expression operators.  Returns a pointer to the
+   last operation that was pushed.  */
+static ada_structop_operation *
 write_selectors (struct parser_state *par_state, const char *sels)
 {
+  ada_structop_operation *result = nullptr;
   while (*sels != '\0')
     {
       const char *p = chop_separator (sels);
@@ -1420,9 +1533,11 @@ write_selectors (struct parser_state *par_state, const char *sels)
 	     && (sels[0] != '_' || sels[1] != '_'))
 	sels += 1;
       operation_up arg = ada_pop ();
-      pstate->push_new<ada_structop_operation>
-	(std::move (arg), std::string (p, sels - p));
+      result = new ada_structop_operation (std::move (arg),
+					   std::string (p, sels - p));
+      pstate->push (operation_up (result));
     }
+  return result;
 }
 
 /* Write a variable access (OP_VAR_VALUE) to ambiguous encoded name
@@ -1590,8 +1705,7 @@ write_var_or_type (struct parser_state *par_state,
 	      write_selectors (par_state, encoded_name + tail_index);
 	      return NULL;
 	    default:
-	      internal_error (__FILE__, __LINE__,
-			      _("impossible value from ada_parse_renaming"));
+	      internal_error (_("impossible value from ada_parse_renaming"));
 	    }
 
 	  if (type_sym != NULL)
@@ -1629,8 +1743,12 @@ write_var_or_type (struct parser_state *par_state,
 	    }
 	  else if (syms.empty ())
 	    {
+	      struct objfile *objfile = nullptr;
+	      if (block != nullptr)
+		objfile = block->objfile ();
+
 	      struct bound_minimal_symbol msym
-		= ada_lookup_simple_minsym (decoded_name.c_str ());
+		= ada_lookup_simple_minsym (decoded_name.c_str (), objfile);
 	      if (msym.minsym != NULL)
 		{
 		  par_state->push_new<ada_var_msym_value_operation> (msym);
@@ -1667,6 +1785,72 @@ write_var_or_type (struct parser_state *par_state,
 
   error (_("Could not find renamed symbol \"%s\""), name0.ptr);
 
+}
+
+/* Because ada_completer_word_break_characters does not contain '.' --
+   and it cannot easily be added, this breaks other completions -- we
+   have to recreate the completion word-splitting here, so that we can
+   provide a prefix that is then used when completing field names.
+   Without this, an attempt like "complete print abc.d" will give a
+   result like "print def" rather than "print abc.def".  */
+
+static std::string
+find_completion_bounds (struct parser_state *par_state)
+{
+  const char *end = pstate->lexptr;
+  /* First the end of the prefix.  Here we stop at the token start or
+     at '.' or space.  */
+  for (; end > original_expr && end[-1] != '.' && !isspace (end[-1]); --end)
+    {
+      /* Nothing.  */
+    }
+  /* Now find the start of the prefix.  */
+  const char *ptr = end;
+  /* Here we allow '.'.  */
+  for (;
+       ptr > original_expr && (ptr[-1] == '.'
+			       || ptr[-1] == '_'
+			       || (ptr[-1] >= 'a' && ptr[-1] <= 'z')
+			       || (ptr[-1] >= 'A' && ptr[-1] <= 'Z')
+			       || (ptr[-1] & 0xff) >= 0x80);
+       --ptr)
+    {
+      /* Nothing.  */
+    }
+  /* ... except, skip leading spaces.  */
+  ptr = skip_spaces (ptr);
+
+  return std::string (ptr, end);
+}
+
+/* A wrapper for write_var_or_type that is used specifically when
+   completion is requested for the last of a sequence of
+   identifiers.  */
+
+static struct type *
+write_var_or_type_completion (struct parser_state *par_state,
+			      const struct block *block, struct stoken name0)
+{
+  int tail_index = chop_selector (name0.ptr, name0.length);
+  /* If there's no separator, just defer to ordinary symbol
+     completion.  */
+  if (tail_index == -1)
+    return write_var_or_type (par_state, block, name0);
+
+  std::string copy (name0.ptr, tail_index);
+  struct type *type = write_var_or_type (par_state, block,
+					 { copy.c_str (),
+					   (int) copy.length () });
+  /* For completion purposes, it's enough that we return a type
+     here.  */
+  if (type != nullptr)
+    return type;
+
+  ada_structop_operation *op = write_selectors (par_state,
+						name0.ptr + tail_index);
+  op->set_prefix (find_completion_bounds (par_state));
+  par_state->mark_struct_expression (op);
+  return nullptr;
 }
 
 /* Write a left side of a component association (e.g., NAME in NAME =>
@@ -1707,30 +1891,6 @@ write_name_assoc (struct parser_state *par_state, struct stoken name)
 }
 
 static struct type *
-type_int (struct parser_state *par_state)
-{
-  return parse_type (par_state)->builtin_int;
-}
-
-static struct type *
-type_long (struct parser_state *par_state)
-{
-  return parse_type (par_state)->builtin_long;
-}
-
-static struct type *
-type_long_long (struct parser_state *par_state)
-{
-  return parse_type (par_state)->builtin_long_long;
-}
-
-static struct type *
-type_long_double (struct parser_state *par_state)
-{
-  return parse_type (par_state)->builtin_long_double;
-}
-
-static struct type *
 type_for_char (struct parser_state *par_state, ULONGEST value)
 {
   if (value <= 0xff)
@@ -1743,12 +1903,6 @@ type_for_char (struct parser_state *par_state, ULONGEST value)
   return language_lookup_primitive_type (par_state->language (),
 					 par_state->gdbarch (),
 					 "wide_wide_character");
-}
-
-static struct type *
-type_boolean (struct parser_state *par_state)
-{
-  return parse_type (par_state)->builtin_bool;
 }
 
 static struct type *

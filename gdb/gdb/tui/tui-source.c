@@ -1,6 +1,6 @@
 /* TUI display source window.
 
-   Copyright (C) 1998-2022 Free Software Foundation, Inc.
+   Copyright (C) 1998-2023 Free Software Foundation, Inc.
 
    Contributed by Hewlett-Packard Company.
 
@@ -65,12 +65,12 @@ tui_source_window::set_contents (struct gdbarch *arch,
   int cur_line_no, cur_line;
   const char *s_filename = symtab_to_filename_for_display (s);
 
-  title = s_filename;
+  set_title (s_filename);
 
   m_fullname = make_unique_xstrdup (symtab_to_fullname (s));
 
   cur_line = 0;
-  m_gdbarch = s->objfile ()->arch ();
+  m_gdbarch = s->compunit ()->objfile ()->arch ();
   m_start_line_or_addr.loa = LOA_LINE;
   cur_line_no = m_start_line_or_addr.u.line_no = line_no;
 
@@ -79,8 +79,11 @@ tui_source_window::set_contents (struct gdbarch *arch,
     {
       /* Solaris 11+gcc 5.5 has ambiguous overloads of log10, so we
 	 cast to double to get the right one.  */
-      double l = log10 ((double) offsets->size ());
-      m_digits = 1 + (int) l;
+      int lines_in_file = offsets->size ();
+      int max_line_nr = lines_in_file;
+      int digits_needed = 1 + (int)log10 ((double) max_line_nr);
+      int trailing_space = 1;
+      m_digits = digits_needed + trailing_space;
     }
 
   m_max_length = -1;
@@ -96,6 +99,11 @@ tui_source_window::set_contents (struct gdbarch *arch,
 	  int line_len;
 	  text = tui_copy_source_line (&iter, &line_len);
 	  m_max_length = std::max (m_max_length, line_len);
+	}
+      else
+	{
+	  /* Line not in source file.  */
+	  cur_line_no = -1;
 	}
 
       /* Set whether element is the execution point
@@ -140,7 +148,7 @@ tui_source_window::do_scroll_vertical (int num_to_scroll)
 
       if (cursal.symtab == NULL)
 	{
-	  struct frame_info *fi = get_selected_frame (NULL);
+	  frame_info_ptr fi = get_selected_frame (NULL);
 	  s = find_pc_line_symtab (get_frame_pc (fi));
 	  arch = get_frame_arch (fi);
 	}
@@ -191,7 +199,7 @@ tui_source_window::line_is_displayed (int line) const
 }
 
 void
-tui_source_window::maybe_update (struct frame_info *fi, symtab_and_line sal)
+tui_source_window::maybe_update (frame_info_ptr fi, symtab_and_line sal)
 {
   int start_line = (sal.line - ((height - 2) / 2)) + 1;
   if (start_line <= 0)
@@ -230,10 +238,20 @@ tui_source_window::display_start_addr (struct gdbarch **gdbarch_p,
 void
 tui_source_window::show_line_number (int offset) const
 {
-  int lineno = m_content[0].line_or_addr.u.line_no + offset;
+  int lineno = m_content[offset].line_or_addr.u.line_no;
   char text[20];
-  /* To completely overwrite the previous border when the source window height
-     is increased, both spaces after the line number have to be redrawn.  */
-  xsnprintf (text, sizeof (text), "%*d  ", m_digits - 1, lineno);
+  char space = tui_left_margin_verbose ? '_' : ' ';
+  if (lineno == -1)
+    {
+      /* Line not in source file, don't show line number.  */
+      for (int i = 0; i <= m_digits; ++i)
+	text[i] = (i == m_digits) ? '\0' : space;
+    }
+  else
+    {
+      xsnprintf (text, sizeof (text),
+		 tui_left_margin_verbose ? "%0*d%c" : "%*d%c", m_digits - 1,
+		 lineno, space);
+    }
   waddstr (handle.get (), text);
 }

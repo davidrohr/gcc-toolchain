@@ -1,5 +1,5 @@
 /* x86_64 ELF support for BFD.
-   Copyright (C) 2000-2022 Free Software Foundation, Inc.
+   Copyright (C) 2000-2023 Free Software Foundation, Inc.
    Contributed by Jan Hubicka <jh@suse.cz>
 
    This file is part of BFD, the Binary File Descriptor library.
@@ -95,4 +95,9 @@ END_RELOC_NUMBERS (R_X86_64_max)
 #define SHN_X86_64_LCOMMON 	(SHN_LORESERVE + 2)
 
 #define SHF_X86_64_LARGE	0x10000000
+
+#define DT_X86_64_PLT		(DT_LOPROC + 0)
+#define DT_X86_64_PLTSZ		(DT_LOPROC + 1)
+#define DT_X86_64_PLTENT	(DT_LOPROC + 3)
+
 #endif

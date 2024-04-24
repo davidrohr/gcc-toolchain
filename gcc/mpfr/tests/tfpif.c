@@ -1,6 +1,6 @@
 /* Test file for mpfr_fpif.
 
-Copyright 2012-2020 Free Software Foundation, Inc.
+Copyright 2012-2023 Free Software Foundation, Inc.
 Contributed by Olivier Demengeon.
 
 This file is part of the GNU MPFR Library.
@@ -262,7 +262,6 @@ check_bad (void)
       perror ("check_bad");
       fprintf (stderr, "Failed to open \"%s\" for writing\n",
               filenameCompressed);
-      fclose (fh);
       remove (filenameCompressed);
       exit (1);
     }
@@ -277,7 +276,10 @@ check_bad (void)
 
   for (i = 0; i < BAD; i++)
     {
-      mpfr_exp_t emax;
+      mpfr_exp_t INITIALIZED(emax);
+      /* The INITIALIZED() is a workaround for GCC bug 106155:
+         https://gcc.gnu.org/bugzilla/show_bug.cgi?id=106155 */
+
       /* For i == 6, mpfr_prec_t needs at least a 65-bit precision
          (64 value bits + 1 sign bit) to avoid a failure. */
       if (i == 6 && MPFR_PREC_BITS > 64)
@@ -286,7 +288,7 @@ check_bad (void)
       if (i == 9)
         {
           emax = mpfr_get_emax ();
-          mpfr_set_emax (46);
+          set_emax (46);
         }
       rewind (fh);
       status = fwrite (&badData[i][0], badDataSize[i], 1, fh);
@@ -352,7 +354,7 @@ check_bad (void)
           exit (1);
         }
       if (i == 9)
-        mpfr_set_emax (emax);
+        set_emax (emax);
     }
 
   if (fclose (fh) != 0)

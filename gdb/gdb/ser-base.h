@@ -1,6 +1,6 @@
 /* Generic serial interface functions.
 
-   Copyright (C) 2005-2022 Free Software Foundation, Inc.
+   Copyright (C) 2005-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -20,7 +20,7 @@
 #ifndef SER_BASE_H
 #define SER_BASE_H
 
-#include "serial.h"  /* For serial_ttystate.  */
+#include "serial.h"
 
 struct serial;
 struct ui_file;

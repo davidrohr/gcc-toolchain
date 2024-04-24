@@ -1,4 +1,4 @@
-/* Copyright (C) 2021-2022 Free Software Foundation, Inc.
+/* Copyright (C) 2021-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -20,7 +20,7 @@
 
 #include "tui/tui.h"
 #include "tui/tui.h"
-#include "gdb_curses.h"	/* For WINDOW.  */
+#include "gdb_curses.h"
 #include "observable.h"
 
 /* Class used to track the current location that the TUI is displaying.  An

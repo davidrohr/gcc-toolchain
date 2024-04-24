@@ -1,6 +1,6 @@
 /* GDB routines for supporting auto-loaded scripts.
 
-   Copyright (C) 2012-2022 Free Software Foundation, Inc.
+   Copyright (C) 2012-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -74,9 +74,9 @@ static void
 show_debug_auto_load (struct ui_file *file, int from_tty,
 		      struct cmd_list_element *c, const char *value)
 {
-  fprintf_filtered (file, _("Debugging output for files "
-			    "of 'set auto-load ...' is %s.\n"),
-		    value);
+  gdb_printf (file, _("Debugging output for files "
+		      "of 'set auto-load ...' is %s.\n"),
+	      value);
 }
 
 /* User-settable option to enable/disable auto-loading of GDB_AUTO_FILE_NAME
@@ -92,9 +92,9 @@ static void
 show_auto_load_gdb_scripts (struct ui_file *file, int from_tty,
 			    struct cmd_list_element *c, const char *value)
 {
-  fprintf_filtered (file, _("Auto-loading of canned sequences of commands "
-			    "scripts is %s.\n"),
-		    value);
+  gdb_printf (file, _("Auto-loading of canned sequences of commands "
+		      "scripts is %s.\n"),
+	      value);
 }
 
 /* See auto-load.h.  */
@@ -132,9 +132,9 @@ static void
 show_auto_load_local_gdbinit (struct ui_file *file, int from_tty,
 			      struct cmd_list_element *c, const char *value)
 {
-  fprintf_filtered (file, _("Auto-loading of .gdbinit script from current "
-			    "directory is %s.\n"),
-		    value);
+  gdb_printf (file, _("Auto-loading of .gdbinit script from current "
+		      "directory is %s.\n"),
+	      value);
 }
 
 /* Directory list from which to load auto-loaded scripts.  It is not checked
@@ -158,9 +158,9 @@ static void
 show_auto_load_dir (struct ui_file *file, int from_tty,
 		    struct cmd_list_element *c, const char *value)
 {
-  fprintf_filtered (file, _("List of directories from which to load "
-			    "auto-loaded scripts is %s.\n"),
-		    value);
+  gdb_printf (file, _("List of directories from which to load "
+		      "auto-loaded scripts is %s.\n"),
+	      value);
 }
 
 /* Directory list safe to hold auto-loaded files.  It is not checked for
@@ -275,12 +275,12 @@ show_auto_load_safe_path (struct ui_file *file, int from_tty,
   for (cs = value; *cs && (*cs == DIRNAME_SEPARATOR || IS_DIR_SEPARATOR (*cs));
        cs++);
   if (*cs == 0)
-    fprintf_filtered (file, _("Auto-load files are safe to load from any "
-			      "directory.\n"));
+    gdb_printf (file, _("Auto-load files are safe to load from any "
+			"directory.\n"));
   else
-    fprintf_filtered (file, _("List of directories from which it is safe to "
-			      "auto-load files is %s.\n"),
-		      value);
+    gdb_printf (file, _("List of directories from which it is safe to "
+			"auto-load files is %s.\n"),
+		value);
 }
 
 /* "add-auto-load-safe-path" command for the auto_load_safe_path configuration
@@ -476,7 +476,7 @@ file_is_auto_load_safe (const char *filename)
 	    }
 	}
 
-      printf_filtered (_("\
+      gdb_printf (_("\
 To enable execution of this file add\n\
 \tadd-auto-load-safe-path %s\n\
 line to your configuration file \"%ps\".\n\
@@ -536,8 +536,8 @@ struct loaded_script
 };
 
 /* Per-program-space data key.  */
-static const struct program_space_key<struct auto_load_pspace_info>
-  auto_load_pspace_data;
+static const registry<program_space>::key<auto_load_pspace_info>
+     auto_load_pspace_data;
 
 /* Get the current autoload data.  If none is found yet, add it now.  This
    function always returns a valid object.  */
@@ -706,12 +706,9 @@ maybe_add_script_text (struct auto_load_pspace_info *pspace_info,
 /* Clear the table of loaded section scripts.  */
 
 static void
-clear_section_scripts (void)
+clear_section_scripts (program_space *pspace)
 {
-  struct program_space *pspace = current_program_space;
-  struct auto_load_pspace_info *info;
-
-  info = auto_load_pspace_data.get (pspace);
+  auto_load_pspace_info *info = auto_load_pspace_data.get (pspace);
   if (info != NULL && info->loaded_script_files != NULL)
     auto_load_pspace_data.clear (pspace);
 }
@@ -733,8 +730,8 @@ auto_load_objfile_script_1 (struct objfile *objfile, const char *realname,
   gdb_file_up input = gdb_fopen_cloexec (filename.c_str (), "r");
   debugfile = filename.c_str ();
 
-  auto_load_debug_printf ("Attempted file \"%s\" %s.",
-			  debugfile,
+  auto_load_debug_printf ("Attempted file \"%ps\" %s.",
+			  styled_string (file_name_style.style (), debugfile),
 			  input != nullptr ? "exists" : "does not exist");
 
   std::string debugfile_holder;
@@ -763,8 +760,9 @@ auto_load_objfile_script_1 (struct objfile *objfile, const char *realname,
 
 	  input = gdb_fopen_cloexec (debugfile, "r");
 
-	  auto_load_debug_printf ("Attempted file \"%s\" %s.",
-				  debugfile,
+	  auto_load_debug_printf ("Attempted file \"%ps\" %s.",
+				  styled_string (file_name_style.style (),
+						 debugfile),
 				  (input != nullptr
 				   ? "exists"
 				   : "does not exist"));
@@ -787,7 +785,7 @@ auto_load_objfile_script_1 (struct objfile *objfile, const char *realname,
       /* Add this script to the hash table too so
 	 "info auto-load ${lang}-scripts" can print it.  */
       pspace_info
-	= get_auto_load_pspace_data_for_loading (current_program_space);
+	= get_auto_load_pspace_data_for_loading (objfile->pspace);
       maybe_add_script_file (pspace_info, is_safe, debugfile, debugfile,
 			     language);
 
@@ -855,9 +853,9 @@ auto_load_objfile_script (struct objfile *objfile,
   struct objfile *parent = objfile->separate_debug_objfile_backlink;
   if (parent != nullptr)
     {
-      unsigned long crc32;
+      uint32_t crc32;
       gdb::unique_xmalloc_ptr<char> debuglink
-	(bfd_get_debug_link_info (parent->obfd, &crc32));
+	(bfd_get_debug_link_info (parent->obfd.get (), &crc32));
 
       if (debuglink.get () != nullptr
 	  && strcmp (debuglink.get (), lbasename (realname.get ())) != 0)
@@ -1051,12 +1049,10 @@ static void
 source_section_scripts (struct objfile *objfile, const char *section_name,
 			const char *start, const char *end)
 {
-  const char *p;
-  struct auto_load_pspace_info *pspace_info;
+  auto_load_pspace_info *pspace_info
+    = get_auto_load_pspace_data_for_loading (objfile->pspace);
 
-  pspace_info = get_auto_load_pspace_data_for_loading (current_program_space);
-
-  for (p = start; p < end; ++p)
+  for (const char *p = start; p < end; ++p)
     {
       const char *entry;
       const struct extension_language_defn *language;
@@ -1118,7 +1114,7 @@ source_section_scripts (struct objfile *objfile, const char *section_name,
 static void
 auto_load_section_scripts (struct objfile *objfile, const char *section_name)
 {
-  bfd *abfd = objfile->obfd;
+  bfd *abfd = objfile->obfd.get ();
   asection *scripts_sect;
   bfd_byte *data = NULL;
 
@@ -1142,7 +1138,11 @@ auto_load_section_scripts (struct objfile *objfile, const char *section_name)
     }
 }
 
-/* Load any auto-loaded scripts for OBJFILE.  */
+/* Load any auto-loaded scripts for OBJFILE.
+
+   Two flavors of auto-loaded scripts are supported.
+   1) based on the path to the objfile
+   2) from .debug_gdb_scripts section  */
 
 void
 load_auto_scripts_for_objfile (struct objfile *objfile)
@@ -1162,25 +1162,6 @@ load_auto_scripts_for_objfile (struct objfile *objfile)
 
   /* Load any scripts mentioned in AUTO_SECTION_NAME (.debug_gdb_scripts).  */
   auto_load_section_scripts (objfile, AUTO_SECTION_NAME);
-}
-
-/* This is a new_objfile observer callback to auto-load scripts.
-
-   Two flavors of auto-loaded scripts are supported.
-   1) based on the path to the objfile
-   2) from .debug_gdb_scripts section  */
-
-static void
-auto_load_new_objfile (struct objfile *objfile)
-{
-  if (!objfile)
-    {
-      /* OBJFILE is NULL when loading a new "main" symbol-file.  */
-      clear_section_scripts ();
-      return;
-    }
-
-  load_auto_scripts_for_objfile (objfile);
 }
 
 /* Collect scripts to be printed in a vec.  */
@@ -1263,15 +1244,14 @@ print_scripts (const std::vector<loaded_script *> &scripts)
    PATTERN.  FROM_TTY is the usual GDB boolean for user interactivity.  */
 
 void
-auto_load_info_scripts (const char *pattern, int from_tty,
-			const struct extension_language_defn *language)
+auto_load_info_scripts (program_space *pspace, const char *pattern,
+			int from_tty, const extension_language_defn *language)
 {
   struct ui_out *uiout = current_uiout;
-  struct auto_load_pspace_info *pspace_info;
 
   dont_repeat ();
 
-  pspace_info = get_auto_load_pspace_data (current_program_space);
+  auto_load_pspace_info *pspace_info = get_auto_load_pspace_data (pspace);
 
   if (pattern && *pattern)
     {
@@ -1348,7 +1328,8 @@ auto_load_info_scripts (const char *pattern, int from_tty,
 static void
 info_auto_load_gdb_scripts (const char *pattern, int from_tty)
 {
-  auto_load_info_scripts (pattern, from_tty, &extension_language_gdb);
+  auto_load_info_scripts (current_program_space, pattern, from_tty,
+			  &extension_language_gdb);
 }
 
 /* Implement 'info auto-load local-gdbinit'.  */
@@ -1357,15 +1338,15 @@ static void
 info_auto_load_local_gdbinit (const char *args, int from_tty)
 {
   if (auto_load_local_gdbinit_pathname == NULL)
-    printf_filtered (_("Local .gdbinit file was not found.\n"));
+    gdb_printf (_("Local .gdbinit file was not found.\n"));
   else if (auto_load_local_gdbinit_loaded)
-    printf_filtered (_("Local .gdbinit file \"%ps\" has been loaded.\n"),
-		     styled_string (file_name_style.style (),
-				    auto_load_local_gdbinit_pathname));
+    gdb_printf (_("Local .gdbinit file \"%ps\" has been loaded.\n"),
+		styled_string (file_name_style.style (),
+			       auto_load_local_gdbinit_pathname));
   else
-    printf_filtered (_("Local .gdbinit file \"%ps\" has not been loaded.\n"),
-		     styled_string (file_name_style.style (),
-				    auto_load_local_gdbinit_pathname));
+    gdb_printf (_("Local .gdbinit file \"%ps\" has not been loaded.\n"),
+		styled_string (file_name_style.style (),
+			       auto_load_local_gdbinit_pathname));
 }
 
 /* Print an "unsupported script" warning if it has not already been printed.
@@ -1535,9 +1516,11 @@ _initialize_auto_load ()
     python_name_help, guile_name_help;
   const char *suffix;
 
-  gdb::observers::new_objfile.attach (auto_load_new_objfile,
-                                      auto_load_new_objfile_observer_token,
-                                      "auto-load");
+  gdb::observers::new_objfile.attach (load_auto_scripts_for_objfile,
+				      auto_load_new_objfile_observer_token,
+				      "auto-load");
+  gdb::observers::all_objfiles_removed.attach (clear_section_scripts,
+					       "auto-load");
   add_setshow_boolean_cmd ("gdb-scripts", class_support,
 			   &auto_load_gdb_scripts, _("\
 Enable or disable auto-loading of canned sequences of commands scripts."), _("\

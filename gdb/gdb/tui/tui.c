@@ -1,6 +1,6 @@
 /* General functions for the WDB TUI.
 
-   Copyright (C) 1998-2022 Free Software Foundation, Inc.
+   Copyright (C) 1998-2023 Free Software Foundation, Inc.
 
    Contributed by Hewlett-Packard Company.
 
@@ -41,6 +41,7 @@
 #include "source.h"
 #include "terminal.h"
 #include "top.h"
+#include "ui.h"
 
 #include <ctype.h>
 #include <signal.h>
@@ -49,6 +50,19 @@
 
 #include "gdb_curses.h"
 #include "interps.h"
+
+/* See tui.h.  */
+
+bool debug_tui = false;
+
+/* Implement 'show debug tui'.  */
+
+static void
+show_tui_debug (struct ui_file *file, int from_tty,
+		struct cmd_list_element *c, const char *value)
+{
+  gdb_printf (file, _("TUI debugging is \"%s\".\n"), value);
+}
 
 /* This redefines CTRL if it is not already defined, so it must come
    after terminal state releated include files like <term.h> and
@@ -108,6 +122,13 @@ tui_rl_switch_mode (int notused1, int notused2)
 	  rl_deprep_terminal ();
 	  tui_enable ();
 	}
+    }
+  catch (const gdb_exception_forced_quit &ex)
+    {
+      /* Ideally, we'd do a 'throw' here, but as noted above, we can't
+	 do that, so, instead, we'll set the necessary flags so that
+	 a later QUIT check will restart the forced quit.  */
+      set_force_quit_flag ();
     }
   catch (const gdb_exception &ex)
     {
@@ -204,7 +225,7 @@ tui_rl_command_key (int count, int key)
 	  rl_newline (1, '\n');
 
 	  /* Switch to gdb command mode while executing the command.
-	     This way the gdb's continue prompty will be displayed.  */
+	     This way the gdb's continue prompt will be displayed.  */
 	  tui_set_key_mode (TUI_ONE_COMMAND_MODE);
 	  return 0;
 	}
@@ -231,6 +252,13 @@ tui_rl_next_keymap (int notused1, int notused2)
   if (!tui_active)
     tui_rl_switch_mode (0 /* notused */, 0 /* notused */);
 
+  if (rl_end)
+    {
+      rl_end = 0;
+      rl_point = 0;
+      rl_mark = 0;
+    }
+
   tui_set_key_mode (tui_current_key_mode == TUI_COMMAND_MODE
 		    ? TUI_SINGLE_KEY_MODE : TUI_COMMAND_MODE);
   return 0;
@@ -243,11 +271,9 @@ tui_rl_next_keymap (int notused1, int notused2)
 static int
 tui_rl_startup_hook (void)
 {
-  rl_already_prompted = 1;
   if (tui_current_key_mode != TUI_COMMAND_MODE
       && !gdb_in_secondary_prompt_p (current_ui))
     tui_set_key_mode (TUI_SINGLE_KEY_MODE);
-  tui_redisplay_readline ();
   return 0;
 }
 
@@ -354,6 +380,8 @@ gdb_getenv_term (void)
 void
 tui_enable (void)
 {
+  TUI_SCOPED_DEBUG_ENTER_EXIT;
+
   if (tui_active)
     return;
 
@@ -494,6 +522,8 @@ tui_enable (void)
 void
 tui_disable (void)
 {
+  TUI_SCOPED_DEBUG_ENTER_EXIT;
+
   if (!tui_active)
     return;
 
@@ -587,4 +617,13 @@ Usage: tui enable"),
 	   _("Disable TUI display mode.\n\
 Usage: tui disable"),
 	   tuicmd);
+
+  /* Debug this tui internals.  */
+  add_setshow_boolean_cmd ("tui", class_maintenance, &debug_tui,  _("\
+Set tui debugging."), _("\
+Show tui debugging."), _("\
+When true, tui specific internal debugging is enabled."),
+			   NULL,
+			   show_tui_debug,
+			   &setdebuglist, &showdebuglist);
 }

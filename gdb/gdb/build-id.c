@@ -1,6 +1,6 @@
 /* build-id-related functions.
 
-   Copyright (C) 1991-2022 Free Software Foundation, Inc.
+   Copyright (C) 1991-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -26,12 +26,19 @@
 #include "objfiles.h"
 #include "filenames.h"
 #include "gdbcore.h"
+#include "cli/cli-style.h"
 
 /* See build-id.h.  */
 
 const struct bfd_build_id *
 build_id_bfd_get (bfd *abfd)
 {
+  /* Dynamic objfiles such as ones created by JIT reader API
+     have no underlying bfd structure (that is, objfile->obfd
+     is NULL).  */
+  if (abfd == nullptr)
+    return nullptr;
+
   if (!bfd_check_format (abfd, bfd_object)
       && !bfd_check_format (abfd, bfd_core))
     return NULL;
@@ -76,7 +83,7 @@ build_id_to_debug_bfd_1 (const std::string &link, size_t build_id_len,
 {
   if (separate_debug_file_debug)
     {
-      fprintf_unfiltered (gdb_stdlog, _("  Trying %s..."), link.c_str ());
+      gdb_printf (gdb_stdlog, _("  Trying %s..."), link.c_str ());
       gdb_flush (gdb_stdlog);
     }
 
@@ -94,8 +101,8 @@ build_id_to_debug_bfd_1 (const std::string &link, size_t build_id_len,
   if (filename == NULL)
     {
       if (separate_debug_file_debug)
-	fprintf_unfiltered (gdb_stdlog,
-			    _(" no, unable to compute real path\n"));
+	gdb_printf (gdb_stdlog,
+		    _(" no, unable to compute real path\n"));
 
       return {};
     }
@@ -106,7 +113,7 @@ build_id_to_debug_bfd_1 (const std::string &link, size_t build_id_len,
   if (debug_bfd == NULL)
     {
       if (separate_debug_file_debug)
-	fprintf_unfiltered (gdb_stdlog, _(" no, unable to open.\n"));
+	gdb_printf (gdb_stdlog, _(" no, unable to open.\n"));
 
       return {};
     }
@@ -114,13 +121,13 @@ build_id_to_debug_bfd_1 (const std::string &link, size_t build_id_len,
   if (!build_id_verify (debug_bfd.get(), build_id_len, build_id))
     {
       if (separate_debug_file_debug)
-	fprintf_unfiltered (gdb_stdlog, _(" no, build-id does not match.\n"));
+	gdb_printf (gdb_stdlog, _(" no, build-id does not match.\n"));
 
       return {};
     }
 
   if (separate_debug_file_debug)
-    fprintf_unfiltered (gdb_stdlog, _(" yes!\n"));
+    gdb_printf (gdb_stdlog, _(" yes!\n"));
 
   return debug_bfd;
 }
@@ -202,17 +209,18 @@ build_id_to_exec_bfd (size_t build_id_len, const bfd_byte *build_id)
 /* See build-id.h.  */
 
 std::string
-find_separate_debug_file_by_buildid (struct objfile *objfile)
+find_separate_debug_file_by_buildid (struct objfile *objfile,
+				     deferred_warnings *warnings)
 {
   const struct bfd_build_id *build_id;
 
-  build_id = build_id_bfd_get (objfile->obfd);
+  build_id = build_id_bfd_get (objfile->obfd.get ());
   if (build_id != NULL)
     {
       if (separate_debug_file_debug)
-	fprintf_unfiltered (gdb_stdlog,
-			    _("\nLooking for separate debug info (build-id) for "
-			      "%s\n"), objfile_name (objfile));
+	gdb_printf (gdb_stdlog,
+		    _("\nLooking for separate debug info (build-id) for "
+		      "%s\n"), objfile_name (objfile));
 
       gdb_bfd_ref_ptr abfd (build_id_to_debug_bfd (build_id->size,
 						   build_id->data));
@@ -220,8 +228,15 @@ find_separate_debug_file_by_buildid (struct objfile *objfile)
       if (abfd != NULL
 	  && filename_cmp (bfd_get_filename (abfd.get ()),
 			   objfile_name (objfile)) == 0)
-	warning (_("\"%s\": separate debug info file has no debug info"),
-		 bfd_get_filename (abfd.get ()));
+	{
+	  if (separate_debug_file_debug)
+	    gdb_printf (gdb_stdlog, "\"%s\": separate debug info file has no "
+			"debug info", bfd_get_filename (abfd.get ()));
+	  warnings->warn (_("\"%ps\": separate debug info file has no "
+			    "debug info"),
+			  styled_string (file_name_style.style (),
+					 bfd_get_filename (abfd.get ())));
+	}
       else if (abfd != NULL)
 	return std::string (bfd_get_filename (abfd.get ()));
     }

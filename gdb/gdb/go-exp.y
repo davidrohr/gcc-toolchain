@@ -1,6 +1,6 @@
 /* YACC parser for Go expressions, for GDB.
 
-   Copyright (C) 2012-2022 Free Software Foundation, Inc.
+   Copyright (C) 2012-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -59,9 +59,6 @@
 #include "language.h"
 #include "c-lang.h"
 #include "go-lang.h"
-#include "bfd.h" /* Required by objfiles.h.  */
-#include "symfile.h" /* Required by objfiles.h.  */
-#include "objfiles.h" /* For have_full_symbols and have_partial_symbols */
 #include "charset.h"
 #include "block.h"
 #include "expop.h"
@@ -475,7 +472,7 @@ exp	:	SIZEOF_KEYWORD '(' type ')'  %prec UNARY
 			    = parse_type (pstate)->builtin_unsigned_int;
 			  $3 = check_typedef ($3);
 			  pstate->push_new<long_const_operation>
-			    (size_type, (LONGEST) TYPE_LENGTH ($3));
+			    (size_type, (LONGEST) $3->length ());
 			}
 	;
 
@@ -647,11 +644,8 @@ static int
 parse_number (struct parser_state *par_state,
 	      const char *p, int len, int parsed_float, YYSTYPE *putithere)
 {
-  /* FIXME: Shouldn't these be unsigned?  We don't deal with negative values
-     here, and we do kind of silly things like cast to unsigned.  */
-  LONGEST n = 0;
-  LONGEST prevn = 0;
-  ULONGEST un;
+  ULONGEST n = 0;
+  ULONGEST prevn = 0;
 
   int i = 0;
   int c;
@@ -663,10 +657,6 @@ parse_number (struct parser_state *par_state,
 
   /* We have found a "L" or "U" suffix.  */
   int found_suffix = 0;
-
-  ULONGEST high_bit;
-  struct type *signed_type;
-  struct type *unsigned_type;
 
   if (parsed_float)
     {
@@ -702,7 +692,7 @@ parse_number (struct parser_state *par_state,
     }
 
   /* Handle base-switching prefixes 0x, 0t, 0d, 0.  */
-  if (p[0] == '0')
+  if (p[0] == '0' && len > 1)
     switch (p[1])
       {
       case 'x':
@@ -779,18 +769,12 @@ parse_number (struct parser_state *par_state,
       if (i >= base)
 	return ERROR;		/* Invalid digit in this base.  */
 
-      /* Portably test for overflow (only works for nonzero values, so make
-	 a second check for zero).  FIXME: Can't we just make n and prevn
-	 unsigned and avoid this?  */
-      if (c != 'l' && c != 'u' && (prevn >= n) && n != 0)
-	unsigned_p = 1;		/* Try something unsigned.  */
-
-      /* Portably test for unsigned overflow.
-	 FIXME: This check is wrong; for example it doesn't find overflow
-	 on 0x123456789 when LONGEST is 32 bits.  */
-      if (c != 'l' && c != 'u' && n != 0)
+      if (c != 'l' && c != 'u')
 	{
-	  if ((unsigned_p && (ULONGEST) prevn >= (ULONGEST) n))
+	  /* Test for overflow.  */
+	  if (n == 0 && prevn == 0)
+	    ;
+	  else if (prevn >= n)
 	    error (_("Numeric constant too large."));
 	}
       prevn = n;
@@ -808,57 +792,31 @@ parse_number (struct parser_state *par_state,
      the case where it is we just always shift the value more than
      once, with fewer bits each time.  */
 
-  un = (ULONGEST)n >> 2;
-  if (long_p == 0
-      && (un >> (gdbarch_int_bit (par_state->gdbarch ()) - 2)) == 0)
-    {
-      high_bit
-	= ((ULONGEST)1) << (gdbarch_int_bit (par_state->gdbarch ()) - 1);
-
-      /* A large decimal (not hex or octal) constant (between INT_MAX
-	 and UINT_MAX) is a long or unsigned long, according to ANSI,
-	 never an unsigned int, but this code treats it as unsigned
-	 int.  This probably should be fixed.  GCC gives a warning on
-	 such constants.  */
-
-      unsigned_type = parse_type (par_state)->builtin_unsigned_int;
-      signed_type = parse_type (par_state)->builtin_int;
-    }
-  else if (long_p <= 1
-	   && (un >> (gdbarch_long_bit (par_state->gdbarch ()) - 2)) == 0)
-    {
-      high_bit
-	= ((ULONGEST)1) << (gdbarch_long_bit (par_state->gdbarch ()) - 1);
-      unsigned_type = parse_type (par_state)->builtin_unsigned_long;
-      signed_type = parse_type (par_state)->builtin_long;
-    }
+  int int_bits = gdbarch_int_bit (par_state->gdbarch ());
+  int long_bits = gdbarch_long_bit (par_state->gdbarch ());
+  int long_long_bits = gdbarch_long_long_bit (par_state->gdbarch ());
+  bool have_signed = !unsigned_p;
+  bool have_int = long_p == 0;
+  bool have_long = long_p <= 1;
+  if (have_int && have_signed && fits_in_type (1, n, int_bits, true))
+    putithere->typed_val_int.type = parse_type (par_state)->builtin_int;
+  else if (have_int && fits_in_type (1, n, int_bits, false))
+    putithere->typed_val_int.type
+      = parse_type (par_state)->builtin_unsigned_int;
+  else if (have_long && have_signed && fits_in_type (1, n, long_bits, true))
+    putithere->typed_val_int.type = parse_type (par_state)->builtin_long;
+  else if (have_long && fits_in_type (1, n, long_bits, false))
+    putithere->typed_val_int.type
+      = parse_type (par_state)->builtin_unsigned_long;
+  else if (have_signed && fits_in_type (1, n, long_long_bits, true))
+    putithere->typed_val_int.type
+      = parse_type (par_state)->builtin_long_long;
+  else if (fits_in_type (1, n, long_long_bits, false))
+    putithere->typed_val_int.type
+      = parse_type (par_state)->builtin_unsigned_long_long;
   else
-    {
-      int shift;
-      if (sizeof (ULONGEST) * HOST_CHAR_BIT
-	  < gdbarch_long_long_bit (par_state->gdbarch ()))
-	/* A long long does not fit in a LONGEST.  */
-	shift = (sizeof (ULONGEST) * HOST_CHAR_BIT - 1);
-      else
-	shift = (gdbarch_long_long_bit (par_state->gdbarch ()) - 1);
-      high_bit = (ULONGEST) 1 << shift;
-      unsigned_type = parse_type (par_state)->builtin_unsigned_long_long;
-      signed_type = parse_type (par_state)->builtin_long_long;
-    }
-
-   putithere->typed_val_int.val = n;
-
-   /* If the high bit of the worked out type is set then this number
-      has to be unsigned.  */
-
-   if (unsigned_p || (n & high_bit))
-     {
-       putithere->typed_val_int.type = unsigned_type;
-     }
-   else
-     {
-       putithere->typed_val_int.type = signed_type;
-     }
+    error (_("Numeric constant too large."));
+  putithere->typed_val_int.val = n;
 
    return INT;
 }
@@ -940,14 +898,14 @@ parse_string_or_char (const char *tokptr, const char **outptr,
   return quote == '\'' ? CHAR : STRING;
 }
 
-struct token
+struct go_token
 {
   const char *oper;
   int token;
   enum exp_opcode opcode;
 };
 
-static const struct token tokentab3[] =
+static const struct go_token tokentab3[] =
   {
     {">>=", ASSIGN_MODIFY, BINOP_RSH},
     {"<<=", ASSIGN_MODIFY, BINOP_LSH},
@@ -955,7 +913,7 @@ static const struct token tokentab3[] =
     {"...", DOTDOTDOT, OP_NULL},
   };
 
-static const struct token tokentab2[] =
+static const struct go_token tokentab2[] =
   {
     {"+=", ASSIGN_MODIFY, BINOP_ADD},
     {"-=", ASSIGN_MODIFY, BINOP_SUB},
@@ -981,7 +939,7 @@ static const struct token tokentab2[] =
   };
 
 /* Identifier-like tokens.  */
-static const struct token ident_tokens[] =
+static const struct go_token ident_tokens[] =
   {
     {"true", TRUE_KEYWORD, OP_NULL},
     {"false", FALSE_KEYWORD, OP_NULL},
@@ -1287,7 +1245,7 @@ lex_one_token (struct parser_state *par_state)
 }
 
 /* An object of this type is pushed on a FIFO by the "outer" lexer.  */
-struct token_and_value
+struct go_token_and_value
 {
   int token;
   YYSTYPE value;
@@ -1295,7 +1253,7 @@ struct token_and_value
 
 /* A FIFO of tokens that have been read but not yet returned to the
    parser.  */
-static std::vector<token_and_value> token_fifo;
+static std::vector<go_token_and_value> token_fifo;
 
 /* Non-zero if the lexer should return tokens from the FIFO.  */
 static int popping;
@@ -1435,16 +1393,16 @@ classify_name (struct parser_state *par_state, const struct block *block)
      current package.  */
 
   {
-    char *current_package_name = go_block_package_name (block);
+    gdb::unique_xmalloc_ptr<char> current_package_name
+      = go_block_package_name (block);
 
     if (current_package_name != NULL)
       {
 	struct stoken sval =
-	  build_packaged_name (current_package_name,
-			       strlen (current_package_name),
+	  build_packaged_name (current_package_name.get (),
+			       strlen (current_package_name.get ()),
 			       copy.c_str (), copy.size ());
 
-	xfree (current_package_name);
 	sym = lookup_symbol (sval.ptr, block, VAR_DOMAIN,
 			     &is_a_field_of_this);
 	if (sym.symbol)
@@ -1487,11 +1445,11 @@ classify_name (struct parser_state *par_state, const struct block *block)
 static int
 yylex (void)
 {
-  token_and_value current, next;
+  go_token_and_value current, next;
 
   if (popping && !token_fifo.empty ())
     {
-      token_and_value tv = token_fifo[0];
+      go_token_and_value tv = token_fifo[0];
       token_fifo.erase (token_fifo.begin ());
       yylval = tv.value;
       /* There's no need to fall through to handle package.name
@@ -1516,7 +1474,7 @@ yylex (void)
 
   if (next.token == '.')
     {
-      token_and_value name2;
+      go_token_and_value name2;
 
       name2.token = lex_one_token (pstate);
       name2.value = yylval;
@@ -1567,7 +1525,7 @@ go_language::parser (struct parser_state *par_state) const
   pstate = par_state;
 
   scoped_restore restore_yydebug = make_scoped_restore (&yydebug,
-							parser_debug);
+							par_state->debug);
 
   /* Initialize some state used by the lexer.  */
   last_was_structop = 0;

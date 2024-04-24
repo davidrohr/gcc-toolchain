@@ -1,5 +1,5 @@
 /* Run a function on the main thread
-   Copyright (C) 2019-2022 Free Software Foundation, Inc.
+   Copyright (C) 2019-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -20,6 +20,7 @@
 #include "run-on-main-thread.h"
 #include "ser-event.h"
 #if CXX_STD_THREAD
+#include <thread>
 #include <mutex>
 #endif
 #include "gdbsupport/event-loop.h"
@@ -37,6 +38,10 @@ static std::vector<std::function<void ()>> runnables;
 /* Mutex to hold when handling RUNNABLE_EVENT or RUNNABLES.  */
 
 static std::mutex runnable_mutex;
+
+/* The main thread's thread id.  */
+
+static std::thread::id main_thread_id;
 
 #endif
 
@@ -89,10 +94,42 @@ run_on_main_thread (std::function<void ()> &&func)
   serial_event_set (runnable_event);
 }
 
+#if CXX_STD_THREAD
+static bool main_thread_id_initialized = false;
+#endif
+
+/* See run-on-main-thread.h.  */
+
+bool
+is_main_thread ()
+{
+#if CXX_STD_THREAD
+  /* Initialize main_thread_id on first use of is_main_thread.  */
+  if (!main_thread_id_initialized)
+    {
+      main_thread_id_initialized = true;
+
+      main_thread_id = std::this_thread::get_id ();
+    }
+
+  return std::this_thread::get_id () == main_thread_id;
+#else
+  return true;
+#endif
+}
+
 void _initialize_run_on_main_thread ();
 void
 _initialize_run_on_main_thread ()
 {
+#if CXX_STD_THREAD
+  /* The variable main_thread_id should be initialized when entering main, or
+     at an earlier use, so it should already be initialized here.  */
+  gdb_assert (main_thread_id_initialized);
+
+  /* Assume that we execute this in the main thread.  */
+  gdb_assert (is_main_thread ());
+#endif
   runnable_event = make_serial_event ();
   add_file_handler (serial_event_fd (runnable_event), run_events, nullptr,
 		    "run-on-main-thread");

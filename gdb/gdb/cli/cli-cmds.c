@@ -1,6 +1,6 @@
 /* GDB CLI commands.
 
-   Copyright (C) 2000-2022 Free Software Foundation, Inc.
+   Copyright (C) 2000-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -21,17 +21,17 @@
 #include "arch-utils.h"
 #include "readline/tilde.h"
 #include "completer.h"
-#include "target.h"	/* For baud_rate, remote_debug and remote_timeout.  */
-#include "gdbsupport/gdb_wait.h"	/* For shell escape implementation.  */
+#include "target.h"
+#include "gdbsupport/gdb_wait.h"
 #include "gdbcmd.h"
-#include "gdbsupport/gdb_regex.h"	/* Used by apropos_command.  */
+#include "gdbsupport/gdb_regex.h"
 #include "gdb_vfork.h"
 #include "linespec.h"
 #include "expression.h"
 #include "frame.h"
 #include "value.h"
 #include "language.h"
-#include "filenames.h"	/* For DOSish file names.  */
+#include "filenames.h"
 #include "objfiles.h"
 #include "source.h"
 #include "disasm.h"
@@ -39,11 +39,13 @@
 #include "gdbsupport/filestuff.h"
 #include "location.h"
 #include "block.h"
+#include "valprint.h"
 
 #include "ui-out.h"
 #include "interps.h"
 
 #include "top.h"
+#include "ui.h"
 #include "cli/cli-decode.h"
 #include "cli/cli-script.h"
 #include "cli/cli-setshow.h"
@@ -57,7 +59,7 @@
 #include "gdbsupport/gdb_tilde_expand.h"
 
 #ifdef TUI
-#include "tui/tui.h"	/* For tui_active et.al.  */
+#include "tui/tui.h"
 #endif
 
 #include <fcntl.h>
@@ -76,7 +78,7 @@ static void filter_sals (std::vector<symtab_and_line> &);
 
 
 /* See cli-cmds.h. */
-unsigned int max_user_call_depth;
+unsigned int max_user_call_depth = 1024;
 
 /* Define all cmd_list_elements.  */
 
@@ -460,7 +462,7 @@ static void
 show_version (const char *args, int from_tty)
 {
   print_gdb_version (gdb_stdout, true);
-  printf_filtered ("\n");
+  gdb_printf ("\n");
 }
 
 static void
@@ -488,7 +490,20 @@ quit_command (const char *args, int from_tty)
   if (!quit_confirm ())
     error (_("Not confirmed."));
 
-  query_if_trace_running (from_tty);
+  try
+    {
+      query_if_trace_running (from_tty);
+    }
+  catch (const gdb_exception_error &ex)
+    {
+      if (ex.error == TARGET_CLOSE_ERROR)
+	/* We don't care about this since we're quitting anyway, so keep
+	   quitting.  */
+	exception_print (gdb_stderr, ex);
+      else
+	/* Rethrow, to properly handle error (_("Not confirmed.")).  */
+	throw;
+    }
 
   quit_force (args ? &exit_code : NULL, from_tty);
 }
@@ -506,14 +521,14 @@ pwd_command (const char *args, int from_tty)
 	   safe_strerror (errno));
 
   if (strcmp (cwd.get (), current_directory) != 0)
-    printf_filtered (_("Working directory %ps\n (canonically %ps).\n"),
-		     styled_string (file_name_style.style (),
-				    current_directory),
-		     styled_string (file_name_style.style (), cwd.get ()));
+    gdb_printf (_("Working directory %ps\n (canonically %ps).\n"),
+		styled_string (file_name_style.style (),
+			       current_directory),
+		styled_string (file_name_style.style (), cwd.get ()));
   else
-    printf_filtered (_("Working directory %ps.\n"),
-		     styled_string (file_name_style.style (),
-				    current_directory));
+    gdb_printf (_("Working directory %ps.\n"),
+		styled_string (file_name_style.style (),
+			       current_directory));
 }
 
 void
@@ -626,9 +641,9 @@ static void
 show_script_ext_mode (struct ui_file *file, int from_tty,
 		     struct cmd_list_element *c, const char *value)
 {
-  fprintf_filtered (file,
-		    _("Script filename extension recognition is \"%s\".\n"),
-		    value);
+  gdb_printf (file,
+	      _("Script filename extension recognition is \"%s\".\n"),
+	      value);
 }
 
 /* Try to open SCRIPT_FILE.
@@ -749,13 +764,13 @@ source_script_with_search (const char *file, int from_tty, int search_path)
      this if we (may have) used search_path, as printing the full path in
      errors for the non-search case can be more noise than signal.  */
   const char *file_to_open;
-  gdb::unique_xmalloc_ptr<char> tilde_expanded_file;
+  std::string tilde_expanded_file;
   if (search_path)
     file_to_open = opened->full_path.get ();
   else
     {
-      tilde_expanded_file = gdb_tilde_expand_up (file);
-      file_to_open = tilde_expanded_file.get ();
+      tilde_expanded_file = gdb_tilde_expand (file);
+      file_to_open = tilde_expanded_file.c_str ();
     }
   source_script_from_stream (opened->stream.get (), file, file_to_open);
 }
@@ -837,16 +852,15 @@ echo_command (const char *text, int from_tty)
 
 	    c = parse_escape (get_current_arch (), &p);
 	    if (c >= 0)
-	      printf_filtered ("%c", c);
+	      gdb_printf ("%c", c);
 	  }
 	else
-	  printf_filtered ("%c", c);
+	  gdb_printf ("%c", c);
       }
 
-  reset_terminal_style (gdb_stdout);
+  gdb_stdout->reset_style ();
 
   /* Force this output to appear now.  */
-  gdb_stdout->wrap_here (0);
   gdb_flush (gdb_stdout);
 }
 
@@ -861,6 +875,9 @@ exit_status_set_internal_vars (int exit_status)
 
   clear_internalvar (var_code);
   clear_internalvar (var_signal);
+
+  /* Keep the logic here in sync with shell_internal_fn.  */
+
   if (WIFEXITED (exit_status))
     set_internalvar_integer (var_code, WEXITSTATUS (exit_status));
 #ifdef __MINGW32__
@@ -881,8 +898,11 @@ exit_status_set_internal_vars (int exit_status)
     warning (_("unexpected shell command exit status %d"), exit_status);
 }
 
-static void
-shell_escape (const char *arg, int from_tty)
+/* Run ARG under the shell, and return the exit status.  If ARG is
+   NULL, run an interactive shell.  */
+
+static int
+run_under_shell (const char *arg, int from_tty)
 {
 #if defined(CANT_FORK) || \
       (!defined(HAVE_WORKING_VFORK) && !defined(HAVE_WORKING_FORK))
@@ -894,16 +914,16 @@ shell_escape (const char *arg, int from_tty)
     arg = "inferior shell";
 
   if (rc == -1)
-    fprintf_unfiltered (gdb_stderr, "Cannot execute %s: %s\n", arg,
-			safe_strerror (errno));
+    gdb_printf (gdb_stderr, "Cannot execute %s: %s\n", arg,
+		safe_strerror (errno));
   else if (rc)
-    fprintf_unfiltered (gdb_stderr, "%s exited with status %d\n", arg, rc);
+    gdb_printf (gdb_stderr, "%s exited with status %d\n", arg, rc);
 #ifdef GLOBAL_CURDIR
   /* Make sure to return to the directory GDB thinks it is, in case
      the shell command we just ran changed it.  */
   chdir (current_directory);
 #endif
-  exit_status_set_internal_vars (rc);
+  return rc;
 #else /* Can fork.  */
   int status, pid;
 
@@ -921,8 +941,8 @@ shell_escape (const char *arg, int from_tty)
       else
 	execl (user_shell, p, "-c", arg, (char *) 0);
 
-      fprintf_unfiltered (gdb_stderr, "Cannot execute %s: %s\n", user_shell,
-			  safe_strerror (errno));
+      gdb_printf (gdb_stderr, "Cannot execute %s: %s\n", user_shell,
+		  safe_strerror (errno));
       _exit (0177);
     }
 
@@ -930,8 +950,19 @@ shell_escape (const char *arg, int from_tty)
     waitpid (pid, &status, 0);
   else
     error (_("Fork failed"));
-  exit_status_set_internal_vars (status);
+  return status;
 #endif /* Can fork.  */
+}
+
+/* Escape out to the shell to run ARG.  If ARG is NULL, launch and
+   interactive shell.  Sets $_shell_exitcode and $_shell_exitsignal
+   convenience variables based on the exits status.  */
+
+static void
+shell_escape (const char *arg, int from_tty)
+{
+  int status = run_under_shell (arg, from_tty);
+  exit_status_set_internal_vars (status);
 }
 
 /* Implementation of the "shell" command.  */
@@ -971,13 +1002,13 @@ edit_command (const char *arg, int from_tty)
 
       /* Now should only be one argument -- decode it in SAL.  */
       arg1 = arg;
-      event_location_up location = string_to_event_location (&arg1,
-							     current_language);
+      location_spec_up locspec = string_to_location_spec (&arg1,
+							  current_language);
 
       if (*arg1)
 	error (_("Junk at end of line specification."));
 
-      std::vector<symtab_and_line> sals = decode_line_1 (location.get (),
+      std::vector<symtab_and_line> sals = decode_line_1 (locspec.get (),
 							 DECODE_LINE_LIST_MODE,
 							 NULL, NULL, 0);
 
@@ -1008,19 +1039,19 @@ edit_command (const char *arg, int from_tty)
 	    error (_("No source file for address %s."),
 		   paddress (get_current_arch (), sal.pc));
 
-	  gdbarch = sal.symtab->objfile ()->arch ();
+	  gdbarch = sal.symtab->compunit ()->objfile ()->arch ();
 	  sym = find_pc_function (sal.pc);
 	  if (sym)
-	    printf_filtered ("%s is in %s (%s:%d).\n",
-			     paddress (gdbarch, sal.pc),
-			     sym->print_name (),
-			     symtab_to_filename_for_display (sal.symtab),
-			     sal.line);
+	    gdb_printf ("%s is in %s (%s:%d).\n",
+			paddress (gdbarch, sal.pc),
+			sym->print_name (),
+			symtab_to_filename_for_display (sal.symtab),
+			sal.line);
 	  else
-	    printf_filtered ("%s is at %s:%d.\n",
-			     paddress (gdbarch, sal.pc),
-			     symtab_to_filename_for_display (sal.symtab),
-			     sal.line);
+	    gdb_printf ("%s is at %s:%d.\n",
+			paddress (gdbarch, sal.pc),
+			symtab_to_filename_for_display (sal.symtab),
+			sal.line);
 	}
 
       /* If what was given does not imply a symtab, it must be an
@@ -1169,6 +1200,28 @@ pipe_command_completer (struct cmd_list_element *ignore,
      we don't know how to complete.  */
 }
 
+/* Helper for the list_command function.  Prints the lines around (and
+   including) line stored in CURSAL.  ARG contains the arguments used in
+   the command invocation, and is used to determine a special case when
+   printing backwards.  */
+static void
+list_around_line (const char *arg, symtab_and_line cursal)
+{
+  int first;
+
+  first = std::max (cursal.line - get_lines_to_list () / 2, 1);
+
+  /* A small special case --- if listing backwards, and we
+     should list only one line, list the preceding line,
+     instead of the exact line we've just shown after e.g.,
+     stopping for a breakpoint.  */
+  if (arg != NULL && arg[0] == '-'
+      && get_lines_to_list () == 1 && first > 1)
+    first -= 1;
+
+  print_source_lines (cursal.symtab, source_lines_range (first), 0);
+}
+
 static void
 list_command (const char *arg, int from_tty)
 {
@@ -1181,34 +1234,31 @@ list_command (const char *arg, int from_tty)
   const char *p;
 
   /* Pull in the current default source line if necessary.  */
-  if (arg == NULL || ((arg[0] == '+' || arg[0] == '-') && arg[1] == '\0'))
+  if (arg == NULL || ((arg[0] == '+' || arg[0] == '-' || arg[0] == '.') && arg[1] == '\0'))
     {
       set_default_source_symtab_and_line ();
       symtab_and_line cursal = get_current_source_symtab_and_line ();
 
       /* If this is the first "list" since we've set the current
 	 source line, center the listing around that line.  */
-      if (get_first_line_listed () == 0)
+      if (get_first_line_listed () == 0 && (arg == nullptr || arg[0] != '.'))
 	{
-	  int first;
-
-	  first = std::max (cursal.line - get_lines_to_list () / 2, 1);
-
-	  /* A small special case --- if listing backwards, and we
-	     should list only one line, list the preceding line,
-	     instead of the exact line we've just shown after e.g.,
-	     stopping for a breakpoint.  */
-	  if (arg != NULL && arg[0] == '-'
-	      && get_lines_to_list () == 1 && first > 1)
-	    first -= 1;
-
-	  print_source_lines (cursal.symtab, source_lines_range (first), 0);
+	  list_around_line (arg, cursal);
 	}
 
-      /* "l" or "l +" lists next ten lines.  */
-      else if (arg == NULL || arg[0] == '+')
-	print_source_lines (cursal.symtab,
-			    source_lines_range (cursal.line), 0);
+      /* "l" and "l +" lists the next few lines, unless we're listing past
+	 the end of the file.  */
+      else if (arg == nullptr || arg[0] == '+')
+	{
+	  if (last_symtab_line (cursal.symtab) >= cursal.line)
+	    print_source_lines (cursal.symtab,
+				source_lines_range (cursal.line), 0);
+	  else
+	    {
+	      error (_("End of the file was already reached, use \"list .\" to"
+		       " list the current location again"));
+	    }
+	}
 
       /* "l -" lists previous ten lines, the ones before the ten just
 	 listed.  */
@@ -1220,6 +1270,34 @@ list_command (const char *arg, int from_tty)
 	  source_lines_range range (get_first_line_listed (),
 				    source_lines_range::BACKWARD);
 	  print_source_lines (cursal.symtab, range, 0);
+	}
+
+      /* "list ." lists the default location again.  */
+      else if (arg[0] == '.')
+	{
+	  if (target_has_stack ())
+	    {
+	      /* Find the current line by getting the PC of the currently
+		 selected frame, and finding the line associated to it.  */
+	      frame_info_ptr frame = get_selected_frame (nullptr);
+	      CORE_ADDR curr_pc = get_frame_pc (frame);
+	      cursal = find_pc_line (curr_pc, 0);
+	    }
+	  else
+	    {
+	      /* The inferior is not running, so reset the current source
+		 location to the default (usually the main function).  */
+	      clear_current_source_symtab_and_line ();
+	      set_default_source_symtab_and_line ();
+	      cursal = get_current_source_symtab_and_line ();
+	    }
+	  if (cursal.symtab == nullptr)
+	    error (_("No debug information available to print source lines."));
+	  list_around_line (arg, cursal);
+	  /* Set the repeat args so just pressing "enter" after using "list ."
+	     will print the following lines instead of the same lines again. */
+	  if (from_tty)
+	    set_repeat_arguments ("");
 	}
 
       return;
@@ -1242,18 +1320,18 @@ list_command (const char *arg, int from_tty)
     dummy_beg = 1;
   else
     {
-      event_location_up location = string_to_event_location (&arg1,
-							     current_language);
+      location_spec_up locspec
+	= string_to_location_spec (&arg1, current_language);
 
-      /* We know that the ARG string is not empty, yet the attempt to parse
-	 a location from the string consumed no characters.  This most
-	 likely means that the first thing in ARG looks like a location
-	 condition, and so the string_to_event_location call stopped
-	 parsing.  */
+      /* We know that the ARG string is not empty, yet the attempt to
+	 parse a location spec from the string consumed no characters.
+	 This most likely means that the first thing in ARG looks like
+	 a location spec condition, and so the string_to_location_spec
+	 call stopped parsing.  */
       if (arg1 == arg)
 	error (_("Junk at end of line specification."));
 
-      sals = decode_line_1 (location.get (), DECODE_LINE_LIST_MODE,
+      sals = decode_line_1 (locspec.get (), DECODE_LINE_LIST_MODE,
 			    NULL, NULL, 0);
       filter_sals (sals);
       if (sals.empty ())
@@ -1298,17 +1376,17 @@ list_command (const char *arg, int from_tty)
 	     know it was ambiguous.  */
 	  const char *end_arg = arg1;
 
-	  event_location_up location
-	    = string_to_event_location (&arg1, current_language);
+	  location_spec_up locspec
+	    = string_to_location_spec (&arg1, current_language);
 
 	  if (*arg1)
 	    error (_("Junk at end of line specification."));
 
 	  std::vector<symtab_and_line> sals_end
 	    = (dummy_beg
-	       ? decode_line_1 (location.get (), DECODE_LINE_LIST_MODE,
+	       ? decode_line_1 (locspec.get (), DECODE_LINE_LIST_MODE,
 				NULL, NULL, 0)
-	       : decode_line_1 (location.get (), DECODE_LINE_LIST_MODE,
+	       : decode_line_1 (locspec.get (), DECODE_LINE_LIST_MODE,
 				NULL, sal.symtab, sal.line));
 
 	  filter_sals (sals_end);
@@ -1347,17 +1425,17 @@ list_command (const char *arg, int from_tty)
 	error (_("No source file for address %s."),
 	       paddress (get_current_arch (), sal.pc));
 
-      gdbarch = sal.symtab->objfile ()->arch ();
+      gdbarch = sal.symtab->compunit ()->objfile ()->arch ();
       sym = find_pc_function (sal.pc);
       if (sym)
-	printf_filtered ("%s is in %s (%s:%d).\n",
-			 paddress (gdbarch, sal.pc),
-			 sym->print_name (),
-			 symtab_to_filename_for_display (sal.symtab), sal.line);
+	gdb_printf ("%s is in %s (%s:%d).\n",
+		    paddress (gdbarch, sal.pc),
+		    sym->print_name (),
+		    symtab_to_filename_for_display (sal.symtab), sal.line);
       else
-	printf_filtered ("%s is at %s:%d.\n",
-			 paddress (gdbarch, sal.pc),
-			 symtab_to_filename_for_display (sal.symtab), sal.line);
+	gdb_printf ("%s is at %s:%d.\n",
+		    paddress (gdbarch, sal.pc),
+		    symtab_to_filename_for_display (sal.symtab), sal.line);
     }
 
   /* If line was not specified by just a line number, and it does not
@@ -1425,38 +1503,39 @@ print_disassembly (struct gdbarch *gdbarch, const char *name,
   else
 #endif
     {
-      printf_filtered (_("Dump of assembler code "));
+      gdb_printf (_("Dump of assembler code "));
       if (name != NULL)
-	printf_filtered (_("for function %ps:\n"),
-			 styled_string (function_name_style.style (), name));
-      if (block == nullptr || BLOCK_CONTIGUOUS_P (block))
+	gdb_printf (_("for function %ps:\n"),
+		    styled_string (function_name_style.style (), name));
+      if (block == nullptr || block->is_contiguous ())
 	{
 	  if (name == NULL)
-	    printf_filtered (_("from %ps to %ps:\n"),
-			     styled_string (address_style.style (),
-					    paddress (gdbarch, low)),
-			     styled_string (address_style.style (),
-					    paddress (gdbarch, high)));
+	    gdb_printf (_("from %ps to %ps:\n"),
+			styled_string (address_style.style (),
+				       paddress (gdbarch, low)),
+			styled_string (address_style.style (),
+				       paddress (gdbarch, high)));
 
 	  /* Dump the specified range.  */
 	  gdb_disassembly (gdbarch, current_uiout, flags, -1, low, high);
 	}
       else
 	{
-	  for (int i = 0; i < BLOCK_NRANGES (block); i++)
+	  for (const blockrange &range : block->ranges ())
 	    {
-	      CORE_ADDR range_low = BLOCK_RANGE_START (block, i);
-	      CORE_ADDR range_high = BLOCK_RANGE_END (block, i);
-	      printf_filtered (_("Address range %ps to %ps:\n"),
-			       styled_string (address_style.style (),
-					      paddress (gdbarch, range_low)),
-			       styled_string (address_style.style (),
-					      paddress (gdbarch, range_high)));
+	      CORE_ADDR range_low = range.start ();
+	      CORE_ADDR range_high = range.end ();
+
+	      gdb_printf (_("Address range %ps to %ps:\n"),
+			  styled_string (address_style.style (),
+					 paddress (gdbarch, range_low)),
+			  styled_string (address_style.style (),
+					 paddress (gdbarch, range_high)));
 	      gdb_disassembly (gdbarch, current_uiout, flags, -1,
 			       range_low, range_high);
 	    }
 	}
-      printf_filtered (_("End of assembler dump.\n"));
+      gdb_printf (_("End of assembler dump.\n"));
     }
 }
 
@@ -1466,7 +1545,7 @@ print_disassembly (struct gdbarch *gdbarch, const char *name,
 static void
 disassemble_current_function (gdb_disassembly_flags flags)
 {
-  struct frame_info *frame;
+  frame_info_ptr frame;
   struct gdbarch *gdbarch;
   CORE_ADDR low, high, pc;
   const char *name;
@@ -1508,6 +1587,9 @@ disassemble_current_function (gdb_disassembly_flags flags)
 
    A /r modifier will include raw instructions in hex with the assembly.
 
+   A /b modifier is similar to /r except the instruction bytes are printed
+   as separate bytes with no grouping, or endian switching.
+
    A /s modifier will include source code with the assembly, like /m, with
    two important differences:
    1) The output is still in pc address order.
@@ -1545,6 +1627,9 @@ disassemble_command (const char *arg, int from_tty)
 	      break;
 	    case 'r':
 	      flags |= DISASSEMBLY_RAW_INSN;
+	      break;
+	    case 'b':
+	      flags |= DISASSEMBLY_RAW_BYTES;
 	      break;
 	    case 's':
 	      flags |= DISASSEMBLY_SOURCE;
@@ -1731,7 +1816,7 @@ apropos_command (const char *arg, int from_tty)
   compiled_regex pattern (arg, REG_ICASE,
 			  _("Error in regular expression"));
 
-  apropos_cmd (gdb_stdout, cmdlist, verbose, pattern, "");
+  apropos_cmd (gdb_stdout, cmdlist, verbose, pattern);
 }
 
 /* The options for the "alias" command.  */
@@ -2020,9 +2105,9 @@ print_sal_location (const symtab_and_line &sal)
   const char *sym_name = NULL;
   if (sal.symbol != NULL)
     sym_name = sal.symbol->print_name ();
-  printf_filtered (_("file: \"%s\", line number: %d, symbol: \"%s\"\n"),
-		   symtab_to_filename_for_display (sal.symtab),
-		   sal.line, sym_name != NULL ? sym_name : "???");
+  gdb_printf (_("file: \"%s\", line number: %d, symbol: \"%s\"\n"),
+	      symtab_to_filename_for_display (sal.symtab),
+	      sal.line, sym_name != NULL ? sym_name : "???");
 }
 
 /* Print a list of files and line numbers which a user may choose from
@@ -2038,7 +2123,7 @@ ambiguous_line_spec (gdb::array_view<const symtab_and_line> sals,
 {
   va_list ap;
   va_start (ap, format);
-  vprintf_filtered (format, ap);
+  gdb_vprintf (format, ap);
   va_end (ap);
 
   for (const auto &sal : sals)
@@ -2051,8 +2136,8 @@ ambiguous_line_spec (gdb::array_view<const symtab_and_line> sals,
 static int
 cmp_symtabs (const symtab_and_line &sala, const symtab_and_line &salb)
 {
-  const char *dira = sala.symtab->dirname ();
-  const char *dirb = salb.symtab->dirname ();
+  const char *dira = sala.symtab->compunit ()->dirname ();
+  const char *dirb = salb.symtab->compunit ()->dirname ();
   int r;
 
   if (dira == NULL)
@@ -2105,40 +2190,34 @@ filter_sals (std::vector<symtab_and_line> &sals)
   sals.erase (from, sals.end ());
 }
 
-void
-init_cmd_lists (void)
-{
-  max_user_call_depth = 1024;
-}
-
 static void
 show_info_verbose (struct ui_file *file, int from_tty,
 		   struct cmd_list_element *c,
 		   const char *value)
 {
   if (info_verbose)
-    fprintf_filtered (file,
-		      _("Verbose printing of informational messages is %s.\n"),
-		      value);
+    gdb_printf (file,
+		_("Verbose printing of informational messages is %s.\n"),
+		value);
   else
-    fprintf_filtered (file, _("Verbosity is %s.\n"), value);
+    gdb_printf (file, _("Verbosity is %s.\n"), value);
 }
 
 static void
 show_history_expansion_p (struct ui_file *file, int from_tty,
 			  struct cmd_list_element *c, const char *value)
 {
-  fprintf_filtered (file, _("History expansion on command input is %s.\n"),
-		    value);
+  gdb_printf (file, _("History expansion on command input is %s.\n"),
+	      value);
 }
 
 static void
 show_max_user_call_depth (struct ui_file *file, int from_tty,
 			  struct cmd_list_element *c, const char *value)
 {
-  fprintf_filtered (file,
-		    _("The max call depth for user-defined commands is %s.\n"),
-		    value);
+  gdb_printf (file,
+	      _("The max call depth for user-defined commands is %s.\n"),
+	      value);
 }
 
 /* Implement 'show suppress-cli-notifications'.  */
@@ -2147,8 +2226,8 @@ static void
 show_suppress_cli_notifications (ui_file *file, int from_tty,
 				 cmd_list_element *c, const char *value)
 {
-  fprintf_filtered (file, _("Suppression of printing CLI notifications "
-			    "is %s.\n"), value);
+  gdb_printf (file, _("Suppression of printing CLI notifications "
+		      "is %s.\n"), value);
 }
 
 /* Implement 'set suppress-cli-notifications'.  */
@@ -2177,18 +2256,32 @@ setting_cmd (const char *fnname, struct cmd_list_element *showlist,
   if (argc != 1)
     error (_("You can only provide one argument to %s"), fnname);
 
-  struct type *type0 = check_typedef (value_type (argv[0]));
+  struct type *type0 = check_typedef (argv[0]->type ());
 
   if (type0->code () != TYPE_CODE_ARRAY
       && type0->code () != TYPE_CODE_STRING)
     error (_("First argument of %s must be a string."), fnname);
 
-  const char *a0 = (const char *) value_contents (argv[0]).data ();
+  /* Not all languages null-terminate their strings, by moving the string
+     content into a std::string we ensure that a null-terminator is added.
+     For languages that do add a null-terminator the std::string might end
+     up with two null characters at the end, but that's harmless.  */
+  const std::string setting ((const char *) argv[0]->contents ().data (),
+			     type0->length ());
+  const char *a0 = setting.c_str ();
   cmd_list_element *cmd = lookup_cmd (&a0, showlist, "", NULL, -1, 0);
 
   if (cmd == nullptr || cmd->type != show_cmd)
-    error (_("First argument of %s must be a "
-	     "valid setting of the 'show' command."), fnname);
+    {
+      gdb_assert (showlist->prefix != nullptr);
+      std::vector<std::string> components
+	= showlist->prefix->command_components ();
+      std::string full_name = components[0];
+      for (int i = 1; i < components.size (); ++i)
+	full_name += " " + components[i];
+      error (_("First argument of %s must be a valid setting of the "
+	       "'%s' command."), fnname, full_name.c_str ());
+    }
 
   return cmd;
 }
@@ -2200,22 +2293,40 @@ value_from_setting (const setting &var, struct gdbarch *gdbarch)
 {
   switch (var.type ())
     {
+    case var_uinteger:
     case var_integer:
-      if (var.get<int> () == INT_MAX)
-	return value_from_longest (builtin_type (gdbarch)->builtin_int,
-				   0);
-      else
-	return value_from_longest (builtin_type (gdbarch)->builtin_int,
-				   var.get<int> ());
-    case var_zinteger:
-      return value_from_longest (builtin_type (gdbarch)->builtin_int,
-				 var.get<int> ());
+    case var_pinteger:
+      {
+	LONGEST value
+	  = (var.type () == var_uinteger
+	     ? static_cast<LONGEST> (var.get<unsigned int> ())
+	     : static_cast<LONGEST> (var.get<int> ()));
+
+	if (var.extra_literals () != nullptr)
+	  for (const literal_def *l = var.extra_literals ();
+	       l->literal != nullptr;
+	       l++)
+	    if (value == l->use)
+	      {
+		if (l->val.has_value ())
+		  value = *l->val;
+		else
+		  return value::allocate (builtin_type (gdbarch)->builtin_void);
+		break;
+	      }
+
+	if (var.type () == var_uinteger)
+	  return
+	    value_from_ulongest (builtin_type (gdbarch)->builtin_unsigned_int,
+				 static_cast<unsigned int> (value));
+	else
+	  return
+	    value_from_longest (builtin_type (gdbarch)->builtin_int,
+				static_cast<int> (value));
+      }
     case var_boolean:
       return value_from_longest (builtin_type (gdbarch)->builtin_int,
 				 var.get<bool> () ? 1 : 0);
-    case var_zuinteger_unlimited:
-      return value_from_longest (builtin_type (gdbarch)->builtin_int,
-				 var.get<int> ());
     case var_auto_boolean:
       {
 	int val;
@@ -2237,17 +2348,6 @@ value_from_setting (const setting &var, struct gdbarch *gdbarch)
 	return value_from_longest (builtin_type (gdbarch)->builtin_int,
 				   val);
       }
-    case var_uinteger:
-      if (var.get<unsigned int> () == UINT_MAX)
-	return value_from_ulongest
-	  (builtin_type (gdbarch)->builtin_unsigned_int, 0);
-      else
-	return value_from_ulongest
-	  (builtin_type (gdbarch)->builtin_unsigned_int,
-	   var.get<unsigned int> ());
-    case var_zuinteger:
-      return value_from_ulongest (builtin_type (gdbarch)->builtin_unsigned_int,
-				  var.get<unsigned int> ());
     case var_string:
     case var_string_noescape:
     case var_optional_filename:
@@ -2268,12 +2368,7 @@ value_from_setting (const setting &var, struct gdbarch *gdbarch)
 	    len = st.length ();
 	  }
 
-	if (len > 0)
-	  return value_cstring (value, len,
-				builtin_type (gdbarch)->builtin_char);
-	else
-	  return value_cstring ("", 1,
-				builtin_type (gdbarch)->builtin_char);
+	return current_language->value_string (gdbarch, value, len);
       }
     default:
       gdb_assert_not_reached ("bad var_type");
@@ -2317,18 +2412,16 @@ str_value_from_setting (const setting &var, struct gdbarch *gdbarch)
 {
   switch (var.type ())
     {
-    case var_integer:
-    case var_zinteger:
-    case var_boolean:
-    case var_zuinteger_unlimited:
-    case var_auto_boolean:
     case var_uinteger:
-    case var_zuinteger:
+    case var_integer:
+    case var_pinteger:
+    case var_boolean:
+    case var_auto_boolean:
       {
 	std::string cmd_val = get_setshow_command_value_string (var);
 
-	return value_cstring (cmd_val.c_str (), cmd_val.size (),
-			      builtin_type (gdbarch)->builtin_char);
+	return current_language->value_string (gdbarch, cmd_val.c_str (),
+					       cmd_val.size ());
       }
 
     case var_string:
@@ -2355,12 +2448,7 @@ str_value_from_setting (const setting &var, struct gdbarch *gdbarch)
 	    len = st.length ();
 	  }
 
-	if (len > 0)
-	  return value_cstring (value, len,
-				builtin_type (gdbarch)->builtin_char);
-	else
-	  return value_cstring ("", 1,
-				builtin_type (gdbarch)->builtin_char);
+	return current_language->value_string (gdbarch, value, len);
       }
     default:
       gdb_assert_not_reached ("bad var_type");
@@ -2399,6 +2487,63 @@ gdb_maint_setting_str_internal_fn (struct gdbarch *gdbarch,
   return str_value_from_setting (*show_cmd->var, gdbarch);
 }
 
+/* Implementation of the convenience function $_shell.  */
+
+static struct value *
+shell_internal_fn (struct gdbarch *gdbarch,
+		   const struct language_defn *language,
+		   void *cookie, int argc, struct value **argv)
+{
+  if (argc != 1)
+    error (_("You must provide one argument for $_shell."));
+
+  value *val = argv[0];
+  struct type *type = check_typedef (val->type ());
+
+  if (!language->is_string_type_p (type))
+    error (_("Argument must be a string."));
+
+  value_print_options opts;
+  get_no_prettyformat_print_options (&opts);
+
+  string_file stream;
+  value_print (val, &stream, &opts);
+
+  /* We should always have two quote chars, which we'll strip.  */
+  gdb_assert (stream.size () >= 2);
+
+  /* Now strip them.  We don't need the original string, so it's
+     cheaper to do it in place, avoiding a string allocation.  */
+  std::string str = stream.release ();
+  str[str.size () - 1] = 0;
+  const char *command = str.c_str () + 1;
+
+  int exit_status = run_under_shell (command, 0);
+
+  struct type *int_type = builtin_type (gdbarch)->builtin_int;
+
+  /* Keep the logic here in sync with
+     exit_status_set_internal_vars.  */
+
+  if (WIFEXITED (exit_status))
+    return value_from_longest (int_type, WEXITSTATUS (exit_status));
+#ifdef __MINGW32__
+  else if (WIFSIGNALED (exit_status) && WTERMSIG (exit_status) == -1)
+    {
+      /* See exit_status_set_internal_vars.  */
+      return value_from_longest (int_type, exit_status);
+    }
+#endif
+  else if (WIFSIGNALED (exit_status))
+    {
+      /* (0x80 | SIGNO) is what most (all?) POSIX-like shells set as
+	 exit code on fatal signal termination.  */
+      return value_from_longest (int_type, 0x80 | WTERMSIG (exit_status));
+    }
+  else
+    return value::allocate_optimized_out (int_type);
+}
+
 void _initialize_cli_cmds ();
 void
 _initialize_cli_cmds ()
@@ -2422,8 +2567,7 @@ User-defined commands.\n\
 The commands in this class are those defined by the user.\n\
 Use the \"define\" command to define a command."), &cmdlist);
   add_cmd ("support", class_support, _("Support facilities."), &cmdlist);
-  if (!dbx_commands)
-    add_cmd ("status", class_info, _("Status inquiries."), &cmdlist);
+  add_cmd ("status", class_info, _("Status inquiries."), &cmdlist);
   add_cmd ("files", class_files, _("Specifying and examining files."),
 	   &cmdlist);
   add_cmd ("breakpoints", class_breakpoint,
@@ -2589,6 +2733,19 @@ Some integer settings accept an unlimited value, returned\n\
 as 0 or -1 depending on the setting."),
 			 gdb_maint_setting_internal_fn, NULL);
 
+  add_internal_function ("_shell", _("\
+$_shell - execute a shell command and return the result.\n\
+\n\
+    Usage: $_shell (COMMAND)\n\
+\n\
+    Arguments:\n\
+\n\
+      COMMAND: The command to execute.  Must be a string.\n\
+\n\
+    Returns:\n\
+      The command's exit code: zero on success, non-zero otherwise."),
+			 shell_internal_fn, NULL);
+
   add_cmd ("commands", no_set_class, show_commands, _("\
 Show the history of commands you typed.\n\
 You can supply a command number to start with, or a `+' to start after\n\
@@ -2650,7 +2807,9 @@ and send its output to SHELL_COMMAND."));
     = add_com ("list", class_files, list_command, _("\
 List specified function or line.\n\
 With no argument, lists ten more lines after or around previous listing.\n\
+\"list +\" lists the ten lines following a previous ten-line listing.\n\
 \"list -\" lists the ten lines before a previous ten-line listing.\n\
+\"list .\" lists ten lines around the point of execution in the current frame.\n\
 One argument specifies a line, and ten lines are listed around that line.\n\
 Two arguments with comma between specify starting and ending lines to list.\n\
 Lines can be specified in these ways:\n\
@@ -2667,9 +2826,6 @@ This can be changed using \"set listsize\", and the current value\n\
 can be shown using \"show listsize\"."));
 
   add_com_alias ("l", list_cmd, class_files, 1);
-
-  if (dbx_commands)
-    add_com_alias ("file", list_cmd, class_files, 1);
 
   c = add_com ("disassemble", class_vars, disassemble_command, _("\
 Disassemble a specified section of memory.\n\

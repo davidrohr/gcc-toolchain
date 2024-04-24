@@ -1,6 +1,6 @@
 /* Serial interface for local (hardwired) serial ports on Windows systems
 
-   Copyright (C) 2006-2022 Free Software Foundation, Inc.
+   Copyright (C) 2006-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -219,8 +219,7 @@ ser_windows_setparity (struct serial *scb, int parity)
       state.fParity = TRUE;
       break;
     default:
-      internal_warning (__FILE__, __LINE__,
-			"Incorrect parity value: %d", parity);
+      internal_warning ("Incorrect parity value: %d", parity);
       return -1;
     }
 
@@ -558,7 +557,7 @@ console_select_thread (void *arg)
 
 	  if (event_index != WAIT_OBJECT_0 + 1)
 	    {
-	      /* Wait must have failed; assume an error has occured, e.g.
+	      /* Wait must have failed; assume an error has occurred, e.g.
 		 the handle has been closed.  */
 	      SetEvent (state->except_event);
 	      break;
@@ -868,6 +867,12 @@ pipe_windows_open (struct serial *scb, const char *name)
   if (name == NULL)
     error_no_arg (_("child command"));
 
+  if (*name == '|')
+    {
+      name++;
+      name = skip_spaces (name);
+    }
+
   gdb_argv argv (name);
 
   if (! argv[0] || argv[0][0] == '\0')
@@ -1122,7 +1127,7 @@ net_windows_select_thread (void *arg)
 
 	  if (event_index != WAIT_OBJECT_0 + 1)
 	    {
-	      /* Some error has occured.  Assume that this is an error
+	      /* Some error has occurred.  Assume that this is an error
 		 condition.  */
 	      SetEvent (state->base.except_event);
 	      break;

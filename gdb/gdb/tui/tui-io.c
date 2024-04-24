@@ -1,6 +1,6 @@
 /* TUI support I/O functions.
 
-   Copyright (C) 1998-2022 Free Software Foundation, Inc.
+   Copyright (C) 1998-2023 Free Software Foundation, Inc.
 
    Contributed by Hewlett-Packard Company.
 
@@ -25,6 +25,7 @@
 #include "event-top.h"
 #include "command.h"
 #include "top.h"
+#include "ui.h"
 #include "tui/tui.h"
 #include "tui/tui-data.h"
 #include "tui/tui-io.h"
@@ -44,6 +45,8 @@
 #include "completer.h"
 #include "gdb_curses.h"
 #include <map>
+#include "pager.h"
+#include "gdbsupport/gdb-checked-static-cast.h"
 
 /* This redefines CTRL if it is not already defined, so it must come
    after terminal state releated include files like <term.h> and
@@ -108,11 +111,13 @@ key_is_start_sequence (int ch)
 /* TUI output files.  */
 static struct ui_file *tui_stdout;
 static struct ui_file *tui_stderr;
+static struct ui_file *tui_stdlog;
 struct ui_out *tui_out;
 
 /* GDB output files in non-curses mode.  */
 static struct ui_file *tui_old_stdout;
 static struct ui_file *tui_old_stderr;
+static struct ui_file *tui_old_stdlog;
 cli_ui_out *tui_old_uiout;
 
 /* Readline previous hooks.  */
@@ -365,6 +370,9 @@ apply_ansi_escape (WINDOW *w, const char *buf)
 
   if (reverse_mode_p)
     {
+      if (!style_tui_current_position)
+	return n_read;
+
       /* We want to reverse _only_ the default foreground/background
 	 colors.  If the foreground color is not the default (because
 	 the text was styled), we want to leave it as is.  If e.g.,
@@ -407,18 +415,26 @@ tui_set_reverse_mode (WINDOW *w, bool reverse)
   ui_file_style style = last_style;
 
   reverse_mode_p = reverse;
-  style.set_reverse (reverse);
 
   if (reverse)
     {
       reverse_save_bg = style.get_background ();
       reverse_save_fg = style.get_foreground ();
+
+      if (!style_tui_current_position)
+	{
+	  /* Switch to default style (reversed) while highlighting the
+	     current position.  */
+	  style = {};
+	}
     }
   else
     {
       style.set_bg (reverse_save_bg);
       style.set_fg (reverse_save_fg);
     }
+
+  style.set_reverse (reverse);
 
   tui_apply_style (w, style);
 }
@@ -507,36 +523,37 @@ tui_puts_internal (WINDOW *w, const char *string, int *height)
 
   while ((c = *string++) != 0)
     {
-      if (c == '\n')
-	saw_nl = true;
-
       if (c == '\1' || c == '\2')
 	{
 	  /* Ignore these, they are readline escape-marking
 	     sequences.  */
+	  continue;
 	}
-      else
-	{
-	  if (c == '\033')
-	    {
-	      size_t bytes_read = apply_ansi_escape (w, string - 1);
-	      if (bytes_read > 0)
-		{
-		  string = string + bytes_read - 1;
-		  continue;
-		}
-	    }
-	  do_tui_putc (w, c);
 
-	  if (height != nullptr)
+      if (c == '\033')
+	{
+	  size_t bytes_read = apply_ansi_escape (w, string - 1);
+	  if (bytes_read > 0)
 	    {
-	      int col = getcurx (w);
-	      if (col <= prev_col)
-		++*height;
-	      prev_col = col;
+	      string = string + bytes_read - 1;
+	      continue;
 	    }
+	}
+
+      if (c == '\n')
+	saw_nl = true;
+
+      do_tui_putc (w, c);
+
+      if (height != nullptr)
+	{
+	  int col = getcurx (w);
+	  if (col <= prev_col)
+	    ++*height;
+	  prev_col = col;
 	}
     }
+
   if (TUI_CMD_WIN != nullptr && w == TUI_CMD_WIN->handle.get ())
     update_cmdwin_start_line ();
   if (saw_nl)
@@ -640,7 +657,8 @@ static void
 tui_prep_terminal (int notused1)
 {
 #ifdef NCURSES_MOUSE_VERSION
-  mousemask (ALL_MOUSE_EVENTS, NULL);
+  if (tui_enable_mouse)
+    mousemask (ALL_MOUSE_EVENTS, NULL);
 #endif
 }
 
@@ -758,14 +776,10 @@ tui_mld_getc (FILE *fp)
 static int
 tui_mld_read_key (const struct match_list_displayer *displayer)
 {
-  rl_getc_func_t *prev = rl_getc_function;
-  int c;
-
   /* We can't use tui_getc as we need NEWLINE to not get emitted.  */
-  rl_getc_function = tui_mld_getc;
-  c = rl_read_key ();
-  rl_getc_function = prev;
-  return c;
+  scoped_restore restore_getc_function
+    = make_scoped_restore (&rl_getc_function, tui_mld_getc);
+  return rl_read_key ();
 }
 
 /* TUI version of rl_completion_display_matches_hook.
@@ -828,15 +842,15 @@ tui_setup_io (int mode)
       /* Keep track of previous gdb output.  */
       tui_old_stdout = gdb_stdout;
       tui_old_stderr = gdb_stderr;
-      tui_old_uiout = dynamic_cast<cli_ui_out *> (current_uiout);
-      gdb_assert (tui_old_uiout != nullptr);
+      tui_old_stdlog = gdb_stdlog;
+      tui_old_uiout = gdb::checked_static_cast<cli_ui_out *> (current_uiout);
 
       /* Reconfigure gdb output.  */
       gdb_stdout = tui_stdout;
       gdb_stderr = tui_stderr;
-      gdb_stdlog = gdb_stdout;	/* for moment */
-      gdb_stdtarg = gdb_stderr;	/* for moment */
-      gdb_stdtargerr = gdb_stderr;	/* for moment */
+      gdb_stdlog = tui_stdlog;
+      gdb_stdtarg = gdb_stderr;
+      gdb_stdtargerr = gdb_stderr;
       current_uiout = tui_out;
 
       /* Save tty for SIGCONT.  */
@@ -847,9 +861,9 @@ tui_setup_io (int mode)
       /* Restore gdb output.  */
       gdb_stdout = tui_old_stdout;
       gdb_stderr = tui_old_stderr;
-      gdb_stdlog = gdb_stdout;	/* for moment */
-      gdb_stdtarg = gdb_stderr;	/* for moment */
-      gdb_stdtargerr = gdb_stderr;	/* for moment */
+      gdb_stdlog = tui_old_stdlog;
+      gdb_stdtarg = gdb_stderr;
+      gdb_stdtargerr = gdb_stderr;
       current_uiout = tui_old_uiout;
 
       /* Restore readline.  */
@@ -900,12 +914,13 @@ tui_initialize_io (void)
 #endif
 
   /* Create tui output streams.  */
-  tui_stdout = new tui_file (stdout);
-  tui_stderr = new tui_file (stderr);
-  tui_out = tui_out_new (tui_stdout);
+  tui_stdout = new pager_file (new tui_file (stdout, true));
+  tui_stderr = new tui_file (stderr, false);
+  tui_stdlog = new timestamped_file (tui_stderr);
+  tui_out = new tui_ui_out (tui_stdout);
 
   /* Create the default UI.  */
-  tui_old_uiout = cli_out_new (gdb_stdout);
+  tui_old_uiout = new cli_ui_out (gdb_stdout);
 
 #ifdef TUI_USE_PIPE_FOR_READLINE
   /* Temporary solution for readline writing to stdout: redirect
@@ -1178,7 +1193,7 @@ tui_getc_1 (FILE *fp)
 #endif
 	}
 
-      /* Keycodes above KEY_MAX are not garanteed to be stable.
+      /* Keycodes above KEY_MAX are not guaranteed to be stable.
 	 Compare keyname instead.  */
       if (ch >= KEY_MAX)
 	{
@@ -1258,6 +1273,14 @@ tui_getc (FILE *fp)
   try
     {
       return tui_getc_1 (fp);
+    }
+  catch (const gdb_exception_forced_quit &ex)
+    {
+      /* As noted below, it's not safe to let an exception escape
+	 to newline, so, for this case, reset the quit flag for
+	 later QUIT checking.  */
+      set_force_quit_flag ();
+      return 0;
     }
   catch (const gdb_exception &ex)
     {

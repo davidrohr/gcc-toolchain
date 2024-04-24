@@ -1,5 +1,5 @@
 /* Thread command's finish-state machine, for GDB, the GNU debugger.
-   Copyright (C) 2015-2022 Free Software Foundation, Inc.
+   Copyright (C) 2015-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -19,7 +19,7 @@
 #ifndef THREAD_FSM_H
 #define THREAD_FSM_H
 
-#include "mi/mi-common.h" /* For enum async_reply_reason.  */
+#include "mi/mi-common.h"
 
 struct return_value_info;
 struct thread_fsm_ops;

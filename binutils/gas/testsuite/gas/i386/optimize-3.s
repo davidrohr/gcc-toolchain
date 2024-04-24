@@ -1,9 +1,11 @@
 # Check instructions with optimized encoding
 
-	.allow_index_reg
 	.text
 _start:
 	{nooptimize} testl $0x7f, %eax
+
+	{nooptimize} lock xchg	%ecx, (%edx)
+	{nooptimize} lock xchg	(%ecx), %edx
 
 	{nooptimize} vmovdqa32	%ymm1, %ymm2
 	{nooptimize} vmovdqa64	%ymm1, %ymm2

@@ -1,5 +1,5 @@
 /* Standard wait macros.
-   Copyright (C) 2000-2022 Free Software Foundation, Inc.
+   Copyright (C) 2000-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -20,10 +20,10 @@
 #define COMMON_GDB_WAIT_H
 
 #ifdef HAVE_SYS_WAIT_H
-#include <sys/wait.h> /* POSIX */
+#include <sys/wait.h>
 #else
 #ifdef HAVE_WAIT_H
-#include <wait.h> /* legacy */
+#include <wait.h>
 #endif
 #endif
 

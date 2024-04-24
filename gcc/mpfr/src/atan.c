@@ -1,6 +1,6 @@
 /* mpfr_atan -- arc-tangent of a floating-point number
 
-Copyright 2001-2020 Free Software Foundation, Inc.
+Copyright 2001-2023 Free Software Foundation, Inc.
 Contributed by the AriC and Caramba projects, INRIA.
 
 This file is part of the GNU MPFR Library.
@@ -56,7 +56,7 @@ static const mp_limb_t atan_table[][3] = {
   };
 
 static void
-set_table (mpfr_t y, const mp_limb_t x[3])
+set_table (mpfr_ptr y, const mp_limb_t x[3])
 {
   mpfr_prec_t p = MPFR_PREC(y);
   mp_size_t n = MPFR_PREC2LIMBS(p);
@@ -298,8 +298,8 @@ mpfr_atan (mpfr_ptr atan, mpfr_srcptr x, mpfr_rnd_t rnd_mode)
   MPFR_ZIV_DECL (loop);
 
   MPFR_LOG_FUNC
-    (("x[%Pu]=%.*Rg rnd=%d", mpfr_get_prec (x), mpfr_log_prec, x, rnd_mode),
-     ("atan[%Pu]=%.*Rg inexact=%d",
+    (("x[%Pd]=%.*Rg rnd=%d", mpfr_get_prec (x), mpfr_log_prec, x, rnd_mode),
+     ("atan[%Pd]=%.*Rg inexact=%d",
       mpfr_get_prec (atan), mpfr_log_prec, atan, inexact));
 
   /* Singular cases */

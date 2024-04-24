@@ -1,5 +1,5 @@
 /* Target signal translation functions for GDB.
-   Copyright (C) 1990-2022 Free Software Foundation, Inc.
+   Copyright (C) 1990-2023 Free Software Foundation, Inc.
    Contributed by Cygnus Support.
 
    This file is part of GDB.
@@ -358,7 +358,7 @@ gdb_signal_from_host (int hostsig)
 }
 
 /* Convert a OURSIG (an enum gdb_signal) to the form used by the
-   target operating system (refered to as the ``host'') or zero if the
+   target operating system (referred to as the ``host'') or zero if the
    equivalent host signal is not available.  Set/clear OURSIG_OK
    accordingly. */
 

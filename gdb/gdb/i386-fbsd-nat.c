@@ -1,6 +1,6 @@
 /* Native-dependent code for FreeBSD/i386.
 
-   Copyright (C) 2001-2022 Free Software Foundation, Inc.
+   Copyright (C) 2001-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -27,16 +27,13 @@
 #include <sys/sysctl.h>
 #include <sys/user.h>
 
-#include "fbsd-nat.h"
 #include "i386-tdep.h"
 #include "i386-fbsd-tdep.h"
 #include "i387-tdep.h"
 #include "x86-nat.h"
-#include "gdbsupport/x86-xstate.h"
-#include "x86-bsd-nat.h"
+#include "x86-fbsd-nat.h"
 
-class i386_fbsd_nat_target final
-  : public x86bsd_nat_target<fbsd_nat_target>
+class i386_fbsd_nat_target final : public x86_fbsd_nat_target
 {
 public:
   void fetch_registers (struct regcache *, int) override;
@@ -45,17 +42,9 @@ public:
   const struct target_desc *read_description () override;
 
   void resume (ptid_t, int, enum gdb_signal) override;
-
-#if defined(HAVE_PT_GETDBREGS) && defined(USE_SIGTRAP_SIGINFO)
-  bool supports_stopped_by_hw_breakpoint () override;
-#endif
 };
 
 static i386_fbsd_nat_target the_i386_fbsd_nat_target;
-
-#ifdef PT_GETXSTATE_INFO
-static size_t xsave_len;
-#endif
 
 static int have_ptrace_xmmregs;
 
@@ -66,9 +55,6 @@ void
 i386_fbsd_nat_target::fetch_registers (struct regcache *regcache, int regnum)
 {
   struct gdbarch *gdbarch = regcache->arch ();
-#if defined(PT_GETFSBASE) || defined(PT_GETGSBASE)
-  const struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);
-#endif
   pid_t pid = get_ptrace_pid (regcache->ptid ());
 
   if (fetch_register_set<struct reg> (regcache, regnum, PT_GETREGS,
@@ -111,9 +97,9 @@ i386_fbsd_nat_target::fetch_registers (struct regcache *regcache, int regnum)
      fetching the FPU/XSAVE state unnecessarily.  */
 
 #ifdef PT_GETXSTATE_INFO
-  if (xsave_len != 0)
+  if (m_xsave_info.xsave_len != 0)
     {
-      void *xstateregs = alloca (xsave_len);
+      void *xstateregs = alloca (m_xsave_info.xsave_len);
 
       if (ptrace (PT_GETXSTATE, pid, (PTRACE_TYPE_ARG3) xstateregs, 0) == -1)
 	perror_with_name (_("Couldn't get extended state status"));
@@ -148,9 +134,6 @@ void
 i386_fbsd_nat_target::store_registers (struct regcache *regcache, int regnum)
 {
   struct gdbarch *gdbarch = regcache->arch ();
-#if defined(PT_GETFSBASE) || defined(PT_GETGSBASE)
-  const struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);
-#endif
   pid_t pid = get_ptrace_pid (regcache->ptid ());
 
   if (store_register_set<struct reg> (regcache, regnum, PT_GETREGS, PT_SETREGS,
@@ -193,17 +176,17 @@ i386_fbsd_nat_target::store_registers (struct regcache *regcache, int regnum)
      fetching the FPU/XSAVE state unnecessarily.  */
 
 #ifdef PT_GETXSTATE_INFO
-  if (xsave_len != 0)
+  if (m_xsave_info.xsave_len != 0)
     {
-      void *xstateregs = alloca (xsave_len);
+      void *xstateregs = alloca (m_xsave_info.xsave_len);
 
       if (ptrace (PT_GETXSTATE, pid, (PTRACE_TYPE_ARG3) xstateregs, 0) == -1)
 	perror_with_name (_("Couldn't get extended state status"));
 
       i387_collect_xsave (regcache, regnum, xstateregs, 0);
 
-      if (ptrace (PT_SETXSTATE, pid, (PTRACE_TYPE_ARG3) xstateregs, xsave_len)
-	  == -1)
+      if (ptrace (PT_SETXSTATE, pid, (PTRACE_TYPE_ARG3) xstateregs,
+		  m_xsave_info.xsave_len) == -1)
 	perror_with_name (_("Couldn't write extended state status"));
       return;
     }
@@ -321,28 +304,15 @@ i386fbsd_supply_pcb (struct regcache *regcache, struct pcb *pcb)
 const struct target_desc *
 i386_fbsd_nat_target::read_description ()
 {
-#ifdef PT_GETXSTATE_INFO
-  static int xsave_probed;
-  static uint64_t xcr0;
-#endif
   static int xmm_probed;
 
+  if (inferior_ptid == null_ptid)
+    return this->beneath ()->read_description ();
+
 #ifdef PT_GETXSTATE_INFO
-  if (!xsave_probed)
-    {
-      struct ptrace_xstate_info info;
-
-      if (ptrace (PT_GETXSTATE_INFO, inferior_ptid.pid (),
-		  (PTRACE_TYPE_ARG3) &info, sizeof (info)) == 0)
-	{
-	  xsave_len = info.xsave_len;
-	  xcr0 = info.xsave_mask;
-	}
-      xsave_probed = 1;
-    }
-
-  if (xsave_len != 0)
-    return i386_target_description (xcr0, true);
+  probe_xsave_layout (inferior_ptid.pid ());
+  if (m_xsave_info.xsave_len != 0)
+    return i386_target_description (m_xsave_info.xsave_mask, true);
 #endif
 
   if (!xmm_probed)
@@ -360,16 +330,6 @@ i386_fbsd_nat_target::read_description ()
 
   return i386_target_description (X86_XSTATE_X87_MASK, true);
 }
-
-#if defined(HAVE_PT_GETDBREGS) && defined(USE_SIGTRAP_SIGINFO)
-/* Implement the supports_stopped_by_hw_breakpoints method.  */
-
-bool
-i386_fbsd_nat_target::supports_stopped_by_hw_breakpoint ()
-{
-  return true;
-}
-#endif
 
 void _initialize_i386fbsd_nat ();
 void

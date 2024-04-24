@@ -1,6 +1,6 @@
 /* GDB routines for supporting auto-loaded Guile scripts.
 
-   Copyright (C) 2010-2022 Free Software Foundation, Inc.
+   Copyright (C) 2010-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -38,7 +38,7 @@ static void
 show_auto_load_guile_scripts (struct ui_file *file, int from_tty,
 			      struct cmd_list_element *c, const char *value)
 {
-  fprintf_filtered (file, _("Auto-loading of Guile scripts is %s.\n"), value);
+  gdb_printf (file, _("Auto-loading of Guile scripts is %s.\n"), value);
 }
 
 /* See guile-internal.h.  */
@@ -54,7 +54,8 @@ gdbscm_auto_load_enabled (const struct extension_language_defn *extlang)
 static void
 info_auto_load_guile_scripts (const char *pattern, int from_tty)
 {
-  auto_load_info_scripts (pattern, from_tty, &extension_language_guile);
+  auto_load_info_scripts (current_program_space, pattern, from_tty,
+			  &extension_language_guile);
 }
 
 void

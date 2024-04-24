@@ -2,7 +2,7 @@
 
 THIS FILE IS MACHINE GENERATED WITH CGEN.
 
-Copyright (C) 1996-2022 Free Software Foundation, Inc.
+Copyright (C) 1996-2023 Free Software Foundation, Inc.
 
 This file is part of the GNU simulators.
 
@@ -199,7 +199,7 @@ This file is part of the GNU simulators.
 
 /* If hyper-fast [well not unnecessarily slow] execution is selected, turn
    off frills like tracing and profiling.  */
-/* FIXME: A better way would be to have TRACE_RESULT check for something
+/* FIXME: A better way would be to have CGEN_TRACE_RESULT check for something
    that can cause it to be optimized out.  Another way would be to emit
    special handlers into the instruction "stream".  */
 

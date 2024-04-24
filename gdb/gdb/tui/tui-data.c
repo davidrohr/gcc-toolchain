@@ -1,6 +1,6 @@
 /* TUI data manipulation routines.
 
-   Copyright (C) 1998-2022 Free Software Foundation, Inc.
+   Copyright (C) 1998-2023 Free Software Foundation, Inc.
 
    Contributed by Hewlett-Packard Company.
 
@@ -152,6 +152,17 @@ tui_prev_win (struct tui_win_info *cur_win)
   return *iter;
 }
 
+/* See tui-data.h.  */
+
+void
+tui_win_info::set_title (std::string &&new_title)
+{
+  if (m_title != new_title)
+    {
+      m_title = new_title;
+      check_and_display_highlight_if_needed ();
+    }
+}
 
 void
 tui_win_info::rerender ()

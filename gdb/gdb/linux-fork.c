@@ -1,6 +1,6 @@
 /* GNU/Linux native-dependent code for debugging multiple forks.
 
-   Copyright (C) 2005-2022 Free Software Foundation, Inc.
+   Copyright (C) 2005-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -348,8 +348,8 @@ linux_fork_mourn_inferior (void)
 
   last = find_last_fork ();
   fork_load_infrun_state (last);
-  printf_filtered (_("[Switching to %s]\n"),
-		   target_pid_to_str (inferior_ptid).c_str ());
+  gdb_printf (_("[Switching to %s]\n"),
+	      target_pid_to_str (inferior_ptid).c_str ());
 
   /* If there's only one fork, switch back to non-fork mode.  */
   if (one_fork_p ())
@@ -381,8 +381,8 @@ linux_fork_detach (int from_tty)
   fork_load_infrun_state (&fork_list.front ());
 
   if (from_tty)
-    printf_filtered (_("[Switching to %s]\n"),
-		     target_pid_to_str (inferior_ptid).c_str ());
+    gdb_printf (_("[Switching to %s]\n"),
+		target_pid_to_str (inferior_ptid).c_str ());
 
   /* If there's only one fork, switch back to non-fork mode.  */
   if (one_fork_p ())
@@ -429,6 +429,18 @@ public:
 	    remove_breakpoints ();
 	    fork_load_infrun_state (m_oldfp);
 	    insert_breakpoints ();
+	  }
+	catch (const gdb_exception_quit &ex)
+	  {
+	    /* We can't throw from a destructor, so re-set the quit flag
+	      for later QUIT checking.  */
+	    set_quit_flag ();
+	  }
+	catch (const gdb_exception_forced_quit &ex)
+	  {
+	    /* Like above, but (eventually) cause GDB to terminate by
+	       setting sync_quit_force_run.  */
+	    set_force_quit_flag ();
 	  }
 	catch (const gdb_exception &ex)
 	  {
@@ -509,7 +521,7 @@ Please switch to another checkpoint before deleting the current one"));
   pptid = fi->parent_ptid;
 
   if (from_tty)
-    printf_filtered (_("Killed %s\n"), target_pid_to_str (ptid).c_str ());
+    gdb_printf (_("Killed %s\n"), target_pid_to_str (ptid).c_str ());
 
   delete_fork (ptid);
 
@@ -517,7 +529,7 @@ Please switch to another checkpoint before deleting the current one"));
      list, waitpid the ptid.
      If fi->parent_ptid is a part of lwp and it is stopped, waitpid the
      ptid.  */
-  thread_info *parent = find_thread_ptid (linux_target, pptid);
+  thread_info *parent = linux_target->find_thread (pptid);
   if ((parent == NULL && find_fork_ptid (pptid))
       || (parent != NULL && parent->state == THREAD_STOPPED))
     {
@@ -547,7 +559,7 @@ Please switch to another checkpoint before detaching the current one"));
     error (_("Unable to detach %s"), target_pid_to_str (ptid).c_str ());
 
   if (from_tty)
-    printf_filtered (_("Detached %s\n"), target_pid_to_str (ptid).c_str ());
+    gdb_printf (_("Detached %s\n"), target_pid_to_str (ptid).c_str ());
 
   delete_fork (ptid);
 }
@@ -571,40 +583,40 @@ info_checkpoints_command (const char *arg, int from_tty)
 
       printed = &fi;
       if (fi.ptid == inferior_ptid)
-	printf_filtered ("* ");
+	gdb_printf ("* ");
       else
-	printf_filtered ("  ");
+	gdb_printf ("  ");
 
       ULONGEST pc = fi.pc;
-      printf_filtered ("%d %s", fi.num, target_pid_to_str (fi.ptid).c_str ());
+      gdb_printf ("%d %s", fi.num, target_pid_to_str (fi.ptid).c_str ());
       if (fi.num == 0)
-	printf_filtered (_(" (main process)"));
-      printf_filtered (_(" at "));
-      puts_filtered (paddress (gdbarch, pc));
+	gdb_printf (_(" (main process)"));
+      gdb_printf (_(" at "));
+      gdb_puts (paddress (gdbarch, pc));
 
       symtab_and_line sal = find_pc_line (pc, 0);
       if (sal.symtab)
-	printf_filtered (_(", file %s"),
-			 symtab_to_filename_for_display (sal.symtab));
+	gdb_printf (_(", file %s"),
+		    symtab_to_filename_for_display (sal.symtab));
       if (sal.line)
-	printf_filtered (_(", line %d"), sal.line);
+	gdb_printf (_(", line %d"), sal.line);
       if (!sal.symtab && !sal.line)
 	{
 	  struct bound_minimal_symbol msym;
 
 	  msym = lookup_minimal_symbol_by_pc (pc);
 	  if (msym.minsym)
-	    printf_filtered (", <%s>", msym.minsym->linkage_name ());
+	    gdb_printf (", <%s>", msym.minsym->linkage_name ());
 	}
 
-      putchar_filtered ('\n');
+      gdb_putc ('\n');
     }
   if (printed == NULL)
     {
       if (requested > 0)
-	printf_filtered (_("No checkpoint number %d.\n"), requested);
+	gdb_printf (_("No checkpoint number %d.\n"), requested);
       else
-	printf_filtered (_("No checkpoints.\n"));
+	gdb_printf (_("No checkpoints.\n"));
     }
 }
 
@@ -685,15 +697,15 @@ checkpoint_command (const char *args, int from_tty)
     {
       int parent_pid;
 
-      printf_filtered (_("checkpoint %d: fork returned pid %ld.\n"),
-		       fp != NULL ? fp->num : -1, (long) retpid);
+      gdb_printf (_("checkpoint %d: fork returned pid %ld.\n"),
+		  fp != NULL ? fp->num : -1, (long) retpid);
       if (info_verbose)
 	{
 	  parent_pid = last_target_ptid.lwp ();
 	  if (parent_pid == 0)
 	    parent_pid = last_target_ptid.pid ();
-	  printf_filtered (_("   gdb says parent = %ld.\n"),
-			   (long) parent_pid);
+	  gdb_printf (_("   gdb says parent = %ld.\n"),
+		      (long) parent_pid);
 	}
     }
 
@@ -728,8 +740,8 @@ linux_fork_context (struct fork_info *newfp, int from_tty)
   fork_load_infrun_state (newfp);
   insert_breakpoints ();
 
-  printf_filtered (_("Switching to %s\n"),
-		   target_pid_to_str (inferior_ptid).c_str ());
+  gdb_printf (_("Switching to %s\n"),
+	      target_pid_to_str (inferior_ptid).c_str ());
 
   print_stack_frame (get_selected_frame (NULL), 1, SRC_AND_LOC, 1);
 }

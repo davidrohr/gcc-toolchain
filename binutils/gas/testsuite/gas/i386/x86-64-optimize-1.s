@@ -1,6 +1,5 @@
 # Check 64bit instructions with optimized encoding
 
-	.allow_index_reg
 	.text
 _start:
 	andq	$foo, %rax
@@ -53,3 +52,16 @@ _start:
 	movq	$0x100000000,%rax
 	clrq	%rax
 	clrq	%r14
+	bt	$15, %ax
+	bt	$16, %ax
+	bt	$15, %r8w
+	bt	$16, %r8w
+	bt	$31, %rax
+	bt	$32, %rax
+	bt	$31, %r8
+	btc	$15, %ax
+	btc	$31, %rax
+	btr	$15, %ax
+	btr	$31, %rax
+	bts	$15, %ax
+	bts	$31, %rax

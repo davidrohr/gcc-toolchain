@@ -1,6 +1,6 @@
 /* Disassembly display.
 
-   Copyright (C) 1998-2022 Free Software Foundation, Inc.
+   Copyright (C) 1998-2023 Free Software Foundation, Inc.
 
    Contributed by Hewlett-Packard Company.
 
@@ -41,6 +41,8 @@
 #include "objfiles.h"
 #include "cli/cli-style.h"
 #include "tui/tui-location.h"
+#include "gdbsupport/selftest.h"
+#include "inferior.h"
 
 #include "gdb_curses.h"
 
@@ -168,9 +170,9 @@ tui_find_backward_disassembly_start_address (CORE_ADDR addr)
 					      lookup_msym_prefer::TEXT,
 					      &msym_prev);
   if (msym.minsym != nullptr)
-    return BMSYMBOL_VALUE_ADDRESS (msym);
+    return msym.value_address ();
   else if (msym_prev.minsym != nullptr)
-    return BMSYMBOL_VALUE_ADDRESS (msym_prev);
+    return msym_prev.value_address ();
 
   /* Find the section that ADDR is in, and look for the start of the
      section.  */
@@ -203,6 +205,8 @@ tui_find_disassembly_address (struct gdbarch *gdbarch, CORE_ADDR pc, int from)
 	 instruction fails to disassemble we will take the address of the
 	 previous instruction that did disassemble as the result.  */
       tui_disassemble (gdbarch, asm_lines, pc, max_lines + 1);
+      if (asm_lines.empty ())
+	return pc;
       new_low = asm_lines.back ().addr;
     }
   else
@@ -244,6 +248,8 @@ tui_find_disassembly_address (struct gdbarch *gdbarch, CORE_ADDR pc, int from)
 
 	  /* Disassemble forward.  */
 	  next_addr = tui_disassemble (gdbarch, asm_lines, new_low, max_lines);
+	  if (asm_lines.empty ())
+	    break;
 	  last_addr = asm_lines.back ().addr;
 
 	  /* If disassembling from the current value of NEW_LOW reached PC
@@ -404,7 +410,7 @@ tui_get_begin_asm_address (struct gdbarch **gdbarch_p, CORE_ADDR *addr_p)
 	  struct bound_minimal_symbol main_symbol
 	    = lookup_minimal_symbol (main_name (), nullptr, nullptr);
 	  if (main_symbol.minsym != nullptr)
-	    addr = BMSYMBOL_VALUE_ADDRESS (main_symbol);
+	    addr = main_symbol.value_address ();
 	}
     }
   else				/* The target is executing.  */
@@ -484,7 +490,7 @@ tui_disasm_window::addr_is_displayed (CORE_ADDR addr) const
 }
 
 void
-tui_disasm_window::maybe_update (struct frame_info *fi, symtab_and_line sal)
+tui_disasm_window::maybe_update (frame_info_ptr fi, symtab_and_line sal)
 {
   CORE_ADDR low;
 
@@ -521,4 +527,37 @@ tui_disasm_window::display_start_addr (struct gdbarch **gdbarch_p,
 {
   *gdbarch_p = m_gdbarch;
   *addr_p = m_start_line_or_addr.u.addr;
+}
+
+#if GDB_SELF_TEST
+namespace selftests {
+namespace tui {
+namespace disasm {
+
+static void
+run_tests ()
+{
+  if (current_inferior () != nullptr)
+    {
+      struct gdbarch *gdbarch = current_inferior ()->gdbarch;
+
+      /* Check that tui_find_disassembly_address robustly handles the case of
+	 being passed a PC for which gdb_print_insn throws a MEMORY_ERROR.  */
+      SELF_CHECK (tui_find_disassembly_address (gdbarch, 0, 1) == 0);
+      SELF_CHECK (tui_find_disassembly_address (gdbarch, 0, -1) == 0);
+    }
+}
+
+} /* namespace disasm */
+} /* namespace tui */
+} /* namespace selftests */
+#endif /* GDB_SELF_TEST */
+
+void _initialize_tui_disasm ();
+void
+_initialize_tui_disasm ()
+{
+#if GDB_SELF_TEST
+  selftests::register_test ("tui-disasm", selftests::tui::disasm::run_tests);
+#endif
 }

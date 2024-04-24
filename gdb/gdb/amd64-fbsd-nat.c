@@ -1,6 +1,6 @@
 /* Native-dependent code for FreeBSD/amd64.
 
-   Copyright (C) 2003-2022 Free Software Foundation, Inc.
+   Copyright (C) 2003-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -29,33 +29,23 @@
 #include <sys/user.h>
 #include <machine/reg.h>
 
-#include "fbsd-nat.h"
 #include "amd64-tdep.h"
 #include "amd64-fbsd-tdep.h"
+#include "i387-tdep.h"
 #include "amd64-nat.h"
 #include "x86-nat.h"
-#include "gdbsupport/x86-xstate.h"
-#include "x86-bsd-nat.h"
+#include "x86-fbsd-nat.h"
 
-class amd64_fbsd_nat_target final
-  : public x86bsd_nat_target<fbsd_nat_target>
+class amd64_fbsd_nat_target final : public x86_fbsd_nat_target
 {
 public:
   void fetch_registers (struct regcache *, int) override;
   void store_registers (struct regcache *, int) override;
 
   const struct target_desc *read_description () override;
-
-#if defined(HAVE_PT_GETDBREGS) && defined(USE_SIGTRAP_SIGINFO)
-  bool supports_stopped_by_hw_breakpoint () override;
-#endif
 };
 
 static amd64_fbsd_nat_target the_amd64_fbsd_nat_target;
-
-#ifdef PT_GETXSTATE_INFO
-static size_t xsave_len;
-#endif
 
 /* This is a layout of the amd64 'struct reg' but with i386
    registers.  */
@@ -108,7 +98,7 @@ amd64_fbsd_nat_target::fetch_registers (struct regcache *regcache, int regnum)
 {
   struct gdbarch *gdbarch = regcache->arch ();
 #if defined(PT_GETFSBASE) || defined(PT_GETGSBASE)
-  const i386_gdbarch_tdep *tdep = (i386_gdbarch_tdep *) gdbarch_tdep (gdbarch);
+  const i386_gdbarch_tdep *tdep = gdbarch_tdep<i386_gdbarch_tdep> (gdbarch);
 #endif
   pid_t pid = get_ptrace_pid (regcache->ptid ());
   const struct regset *gregset = find_gregset (gdbarch);
@@ -152,9 +142,9 @@ amd64_fbsd_nat_target::fetch_registers (struct regcache *regcache, int regnum)
      fetching the FPU/XSAVE state unnecessarily.  */
 
 #ifdef PT_GETXSTATE_INFO
-  if (xsave_len != 0)
+  if (m_xsave_info.xsave_len != 0)
     {
-      void *xstateregs = alloca (xsave_len);
+      void *xstateregs = alloca (m_xsave_info.xsave_len);
 
       if (ptrace (PT_GETXSTATE, pid, (PTRACE_TYPE_ARG3) xstateregs, 0) == -1)
 	perror_with_name (_("Couldn't get extended state status"));
@@ -180,7 +170,7 @@ amd64_fbsd_nat_target::store_registers (struct regcache *regcache, int regnum)
 {
   struct gdbarch *gdbarch = regcache->arch ();
 #if defined(PT_GETFSBASE) || defined(PT_GETGSBASE)
-  const i386_gdbarch_tdep *tdep = (i386_gdbarch_tdep *) gdbarch_tdep (gdbarch);
+  const i386_gdbarch_tdep *tdep = gdbarch_tdep<i386_gdbarch_tdep> (gdbarch);
 #endif
   pid_t pid = get_ptrace_pid (regcache->ptid ());
   const struct regset *gregset = find_gregset (gdbarch);
@@ -229,9 +219,9 @@ amd64_fbsd_nat_target::store_registers (struct regcache *regcache, int regnum)
      fetching the FPU/XSAVE state unnecessarily.  */
 
 #ifdef PT_GETXSTATE_INFO
-  if (xsave_len != 0)
+  if (m_xsave_info.xsave_len != 0)
     {
-      void *xstateregs = alloca (xsave_len);
+      void *xstateregs = alloca (m_xsave_info.xsave_len);
 
       if (ptrace (PT_GETXSTATE, pid, (PTRACE_TYPE_ARG3) xstateregs, 0) == -1)
 	perror_with_name (_("Couldn't get extended state status"));
@@ -239,7 +229,7 @@ amd64_fbsd_nat_target::store_registers (struct regcache *regcache, int regnum)
       amd64_collect_xsave (regcache, regnum, xstateregs, 0);
 
       if (ptrace (PT_SETXSTATE, pid, (PTRACE_TYPE_ARG3) xstateregs,
-		  xsave_len) == -1)
+		  m_xsave_info.xsave_len) == -1)
 	perror_with_name (_("Couldn't write extended state status"));
       return;
     }
@@ -309,37 +299,24 @@ amd64fbsd_supply_pcb (struct regcache *regcache, struct pcb *pcb)
 const struct target_desc *
 amd64_fbsd_nat_target::read_description ()
 {
-#ifdef PT_GETXSTATE_INFO
-  static int xsave_probed;
-  static uint64_t xcr0;
-#endif
   struct reg regs;
   int is64;
+
+  if (inferior_ptid == null_ptid)
+    return this->beneath ()->read_description ();
 
   if (ptrace (PT_GETREGS, inferior_ptid.pid (),
 	      (PTRACE_TYPE_ARG3) &regs, 0) == -1)
     perror_with_name (_("Couldn't get registers"));
   is64 = (regs.r_cs == GSEL (GUCODE_SEL, SEL_UPL));
 #ifdef PT_GETXSTATE_INFO
-  if (!xsave_probed)
-    {
-      struct ptrace_xstate_info info;
-
-      if (ptrace (PT_GETXSTATE_INFO, inferior_ptid.pid (),
-		  (PTRACE_TYPE_ARG3) &info, sizeof (info)) == 0)
-	{
-	  xsave_len = info.xsave_len;
-	  xcr0 = info.xsave_mask;
-	}
-      xsave_probed = 1;
-    }
-
-  if (xsave_len != 0)
+  probe_xsave_layout (inferior_ptid.pid ());
+  if (m_xsave_info.xsave_len != 0)
     {
       if (is64)
-	return amd64_target_description (xcr0, true);
+	return amd64_target_description (m_xsave_info.xsave_mask, true);
       else
-	return i386_target_description (xcr0, true);
+	return i386_target_description (m_xsave_info.xsave_mask, true);
     }
 #endif
   if (is64)
@@ -347,16 +324,6 @@ amd64_fbsd_nat_target::read_description ()
   else
     return i386_target_description (X86_XSTATE_SSE_MASK, true);
 }
-
-#if defined(HAVE_PT_GETDBREGS) && defined(USE_SIGTRAP_SIGINFO)
-/* Implement the supports_stopped_by_hw_breakpoints method.  */
-
-bool
-amd64_fbsd_nat_target::supports_stopped_by_hw_breakpoint ()
-{
-  return true;
-}
-#endif
 
 void _initialize_amd64fbsd_nat ();
 void

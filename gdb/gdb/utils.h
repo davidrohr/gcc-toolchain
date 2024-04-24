@@ -1,7 +1,5 @@
-/* *INDENT-OFF* */ /* ATTRIBUTE_PRINTF confuses indent, avoid running it
-		      for now.  */
 /* I/O, string, cleanup, and other random utilities for GDB.
-   Copyright (C) 1986-2022 Free Software Foundation, Inc.
+   Copyright (C) 1986-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -25,10 +23,6 @@
 #include "gdbsupport/array-view.h"
 #include "gdbsupport/scoped_restore.h"
 #include <chrono>
-
-#ifdef HAVE_LIBXXHASH
-#include <xxhash.h>
-#endif
 
 struct completion_match_for_lcd;
 class compiled_regex;
@@ -97,20 +91,6 @@ extern int strncmp_iw (const char *string1, const char *string2,
 extern int strcmp_iw (const char *string1, const char *string2);
 
 extern int strcmp_iw_ordered (const char *, const char *);
-
-/* Return true if the strings are equal.  */
-
-extern bool streq (const char *, const char *);
-
-extern int subset_compare (const char *, const char *);
-
-/* Compare C strings for std::sort.  */
-
-static inline bool
-compare_cstrings (const char *str1, const char *str2)
-{
-  return strcmp (str1, str2) < 0;
-}
 
 /* Reset the prompt_for_continue clock.  */
 void reset_prompt_for_continue_wait_time (void);
@@ -185,16 +165,16 @@ extern int get_chars_per_line ();
 
 extern bool pagination_enabled;
 
+/* A flag indicating whether to timestamp debugging messages.  */
+extern bool debug_timestamp;
+
 extern struct ui_file **current_ui_gdb_stdout_ptr (void);
 extern struct ui_file **current_ui_gdb_stdin_ptr (void);
 extern struct ui_file **current_ui_gdb_stderr_ptr (void);
 extern struct ui_file **current_ui_gdb_stdlog_ptr (void);
 
-/* Flush STREAM.  This is a wrapper for ui_file_flush that also
-   flushes any output pending from uses of the *_filtered output
-   functions; that output is kept in a special buffer so that
-   pagination and styling are handled properly.  */
-extern void gdb_flush (struct ui_file *);
+/* Flush STREAM.  */
+extern void gdb_flush (struct ui_file *stream);
 
 /* The current top level's ui_file streams.  */
 
@@ -202,20 +182,16 @@ extern void gdb_flush (struct ui_file *);
 #define gdb_stdout (*current_ui_gdb_stdout_ptr ())
 /* Input stream */
 #define gdb_stdin (*current_ui_gdb_stdin_ptr ())
-/* Serious error notifications */
+/* Serious error notifications.  This bypasses the pager, if one is in
+   use.  */
 #define gdb_stderr (*current_ui_gdb_stderr_ptr ())
-/* Log/debug/trace messages that should bypass normal stdout/stderr
-   filtering.  For moment, always call this stream using
-   *_unfiltered.  In the very near future that restriction shall be
-   removed - either call shall be unfiltered.  (cagney 1999-06-13).  */
+/* Log/debug/trace messages that bypasses the pager, if one is in
+   use.  */
 #define gdb_stdlog (*current_ui_gdb_stdlog_ptr ())
 
 /* Truly global ui_file streams.  These are all defined in main.c.  */
 
-/* Target output that should bypass normal stdout/stderr filtering.
-   For moment, always call this stream using *_unfiltered.  In the
-   very near future that restriction shall be removed - either call
-   shall be unfiltered.  (cagney 1999-07-02).  */
+/* Target output that should bypass the pager, if one is in use.  */
 extern struct ui_file *gdb_stdtarg;
 extern struct ui_file *gdb_stdtargerr;
 extern struct ui_file *gdb_stdtargin;
@@ -224,58 +200,43 @@ extern struct ui_file *gdb_stdtargin;
 
 extern void set_screen_width_and_height (int width, int height);
 
-/* More generic printf like operations.  Filtered versions may return
-   non-locally on error.  As an extension over plain printf, these
-   support some GDB-specific format specifiers.  Particularly useful
-   here are the styling formatters: '%p[', '%p]' and '%ps'.  See
-   ui_out::message for details.  */
+/* Generic stdio-like operations.  */
 
-extern void fputs_filtered (const char *, struct ui_file *);
+extern void gdb_puts (const char *, struct ui_file *);
 
-extern void fputs_unfiltered (const char *, struct ui_file *);
+extern void gdb_putc (int c, struct ui_file *);
 
-extern int fputc_filtered (int c, struct ui_file *);
+extern void gdb_putc (int c);
 
-extern int fputc_unfiltered (int c, struct ui_file *);
+extern void gdb_puts (const char *);
 
-extern int putchar_filtered (int c);
+extern void puts_tabular (char *string, int width, int right);
 
-extern int putchar_unfiltered (int c);
+/* Generic printf-like operations.  As an extension over plain
+   printf, these support some GDB-specific format specifiers.
+   Particularly useful here are the styling formatters: '%p[', '%p]'
+   and '%ps'.  See ui_out::message for details.  */
 
-extern void puts_filtered (const char *);
+extern void gdb_vprintf (const char *, va_list) ATTRIBUTE_PRINTF (1, 0);
 
-extern void puts_unfiltered (const char *);
-
-extern void puts_filtered_tabular (char *string, int width, int right);
-
-extern void vprintf_filtered (const char *, va_list) ATTRIBUTE_PRINTF (1, 0);
-
-extern void vfprintf_filtered (struct ui_file *, const char *, va_list)
+extern void gdb_vprintf (struct ui_file *, const char *, va_list)
   ATTRIBUTE_PRINTF (2, 0);
 
-extern void fprintf_filtered (struct ui_file *, const char *, ...)
+extern void gdb_printf (struct ui_file *, const char *, ...)
   ATTRIBUTE_PRINTF (2, 3);
 
-extern void printf_filtered (const char *, ...) ATTRIBUTE_PRINTF (1, 2);
-
-extern void vprintf_unfiltered (const char *, va_list) ATTRIBUTE_PRINTF (1, 0);
-
-extern void vfprintf_unfiltered (struct ui_file *, const char *, va_list)
-  ATTRIBUTE_PRINTF (2, 0);
-
-extern void fprintf_unfiltered (struct ui_file *, const char *, ...)
-  ATTRIBUTE_PRINTF (2, 3);
+extern void gdb_printf (const char *, ...) ATTRIBUTE_PRINTF (1, 2);
 
 extern void printf_unfiltered (const char *, ...) ATTRIBUTE_PRINTF (1, 2);
 
-extern void print_spaces_filtered (int, struct ui_file *);
+extern void print_spaces (int, struct ui_file *);
 
 extern const char *n_spaces (int);
 
 /* Return nonzero if filtered printing is initialized.  */
 extern int filtered_printing_initialized (void);
 
-/* Like fprintf_filtered, but styles the output according to STYLE,
+/* Like gdb_printf, but styles the output according to STYLE,
    when appropriate.  */
 
 extern void fprintf_styled (struct ui_file *stream,
@@ -284,45 +245,18 @@ extern void fprintf_styled (struct ui_file *stream,
 			    ...)
   ATTRIBUTE_PRINTF (3, 4);
 
-extern void vfprintf_styled (struct ui_file *stream,
-			     const ui_file_style &style,
-			     const char *fmt,
-			     va_list args)
-  ATTRIBUTE_PRINTF (3, 0);
-
-/* Like vfprintf_styled, but do not process gdb-specific format
-   specifiers.  */
-extern void vfprintf_styled_no_gdbfmt (struct ui_file *stream,
-				       const ui_file_style &style,
-				       bool filter,
-				       const char *fmt, va_list args)
-  ATTRIBUTE_PRINTF (4, 0);
-
-/* Like fputs_filtered, but styles the output according to STYLE, when
+/* Like gdb_puts, but styles the output according to STYLE, when
    appropriate.  */
 
 extern void fputs_styled (const char *linebuffer,
 			  const ui_file_style &style,
 			  struct ui_file *stream);
 
-/* Unfiltered variant of fputs_styled.  */
-
-extern void fputs_styled_unfiltered (const char *linebuffer,
-				     const ui_file_style &style,
-				     struct ui_file *stream);
-
 /* Like fputs_styled, but uses highlight_style to highlight the
    parts of STR that match HIGHLIGHT.  */
 
 extern void fputs_highlighted (const char *str, const compiled_regex &highlight,
 			       struct ui_file *stream);
-
-/* Reset the terminal style to the default, if needed.  */
-
-extern void reset_terminal_style (struct ui_file *stream);
-
-/* Return the address only having significant bits.  */
-extern CORE_ADDR address_significant (gdbarch *gdbarch, CORE_ADDR addr);
 
 /* Convert CORE_ADDR to string in platform-specific manner.
    This is usually formatted similar to 0x%lx.  */
@@ -336,15 +270,18 @@ extern const char *print_core_address (struct gdbarch *gdbarch,
 
 extern CORE_ADDR string_to_core_addr (const char *my_string);
 
-extern void fprintf_symbol_filtered (struct ui_file *, const char *,
-				     enum language, int);
-
-extern void throw_perror_with_name (enum errors errcode, const char *string)
-  ATTRIBUTE_NORETURN;
+extern void fprintf_symbol (struct ui_file *, const char *,
+			    enum language, int);
 
 extern void perror_warning_with_name (const char *string);
 
-extern void print_sys_errmsg (const char *, int);
+/* Issue a warning formatted as '<filename>: <explanation>', where
+   <filename> is FILENAME with filename styling applied.  As such, don't
+   pass anything more than a filename in this string.  The <explanation>
+   is a string returned from calling safe_strerror(SAVED_ERRNO).  */
+
+extern void warning_filename_and_errno (const char *filename,
+					int saved_errno);
 
 /* Warnings and error messages.  */
 
@@ -353,8 +290,6 @@ extern void (*deprecated_error_begin_hook) (void);
 /* Message to be printed before the warning message, when a warning occurs.  */
 
 extern const char *warning_pre_print;
-
-extern void error_stream (const string_file &) ATTRIBUTE_NORETURN;
 
 extern void demangler_vwarning (const char *file, int line,
 			       const char *, va_list ap)
@@ -371,13 +306,6 @@ extern pid_t wait_to_die_with_timeout (pid_t pid, int *status, int timeout);
 #endif
 
 extern int myread (int, char *, int);
-
-/* Integer exponentiation: Return V1**V2, where both arguments
-   are integers.
-
-   Requires V1 != 0 if V2 < 0.
-   Returns 1 for 0 ** 0.  */
-extern ULONGEST uinteger_pow (ULONGEST v1, LONGEST v2);
 
 /* Resource limits used by getrlimit and setrlimit.  */
 
@@ -411,19 +339,90 @@ extern void copy_bitwise (gdb_byte *dest, ULONGEST dest_offset,
 			  const gdb_byte *source, ULONGEST source_offset,
 			  ULONGEST nbits, int bits_big_endian);
 
-/* A fast hashing function.  This can be used to hash data in a fast way
-   when the length is known.  If no fast hashing library is available, falls
-   back to iterative_hash from libiberty.  START_VALUE can be set to
-   continue hashing from a previous value.  */
+/* When readline decides that the terminal cannot auto-wrap lines, it reduces
+   the width of the reported screen width by 1.  This variable indicates
+   whether that's the case or not, allowing us to add it back where
+   necessary.  See _rl_term_autowrap in readline/terminal.c.  */
 
-static inline unsigned int
-fast_hash (const void *ptr, size_t len, unsigned int start_value = 0)
+extern int readline_hidden_cols;
+
+/* Assign VAL to LVAL, and set CHANGED to true if the assignment changed
+   LVAL.  */
+
+template<typename T>
+void
+assign_set_if_changed (T &lval, const T &val, bool &changed)
 {
-#ifdef HAVE_LIBXXHASH
-  return XXH64 (ptr, len, start_value);
-#else
-  return iterative_hash (ptr, len, start_value);
-#endif
+  if (lval == val)
+    return;
+
+  lval = val;
+  changed = true;
 }
+
+/* Assign VAL to LVAL, and return true if the assignment changed LVAL.  */
+
+template<typename T>
+bool
+assign_return_if_changed (T &lval, const T &val)
+{
+  if (lval == val)
+    return false;
+
+  lval = val;
+  return true;
+}
+
+/* In some cases GDB needs to try several different solutions to a problem,
+   if any of the solutions work then as far as the user is concerned the
+   problem is solved, and GDB should continue without warnings.  However,
+   if none of the solutions work then GDB should emit any warnings that
+   occurred while trying each possible solution.
+
+   One example of this is locating separate debug info.  There are several
+   different approaches for this; following the .gnu_debuglink, a build-id
+   based lookup, or using debuginfod.  If any works, and debug info is
+   located, then the user doesn't want to see warnings from the earlier
+   approaches that were tried and failed.
+
+   However, GDB should emit all the warnings using separate calls to
+   warning -- this ensures that each warning is formatted on its own line,
+   and that any styling is emitted correctly.
+
+   This class helps with deferring warnings.  Warnings can be added to an
+   instance of this class with the 'warn' function, and all warnings can be
+   emitted with a single call to 'emit'.  */
+
+struct deferred_warnings
+{
+  /* Add a warning to the list of deferred warnings.  */
+  void warn (const char *format, ...) ATTRIBUTE_PRINTF(2,3)
+  {
+    /* Generate the warning text into a string_file.  We allow the text to
+       be styled only if gdb_stderr allows styling -- warnings are sent to
+       gdb_stderr.  */
+    string_file msg (gdb_stderr->can_emit_style_escape ());
+
+    va_list args;
+    va_start (args, format);
+    msg.vprintf (format, args);
+    va_end (args);
+
+    /* Move the text into the list of deferred warnings.  */
+    m_warnings.emplace_back (std::move (msg));
+  }
+
+  /* Emit all warnings.  */
+  void emit () const
+  {
+    for (const auto &w : m_warnings)
+      warning ("%s", w.c_str ());
+  }
+
+private:
+
+  /* The list of all deferred warnings.  */
+  std::vector<string_file> m_warnings;
+};
 
 #endif /* UTILS_H */

@@ -1,6 +1,6 @@
 /* Serial interface for raw TCP connections on Un*x like systems.
 
-   Copyright (C) 1992-2022 Free Software Foundation, Inc.
+   Copyright (C) 1992-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -30,10 +30,10 @@
 #include <sys/types.h>
 
 #ifdef HAVE_SYS_FILIO_H
-#include <sys/filio.h>  /* For FIONBIO.  */
+#include <sys/filio.h>
 #endif
 #ifdef HAVE_SYS_IOCTL_H
-#include <sys/ioctl.h>  /* For FIONBIO.  */
+#include <sys/ioctl.h>
 #endif
 
 #include "gdbsupport/gdb_sys_time.h"
@@ -296,8 +296,8 @@ net_open (struct serial *scb, const char *name)
 
   if (r != 0)
     {
-      fprintf_unfiltered (gdb_stderr, _("%s: cannot resolve name: %s\n"),
-			  name, gai_strerror (r));
+      gdb_printf (gdb_stderr, _("%s: cannot resolve name: %s\n"),
+		  name, gai_strerror (r));
       errno = ENOENT;
       return -1;
     }

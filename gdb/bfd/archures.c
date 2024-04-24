@@ -1,5 +1,5 @@
 /* BFD library support routines for architectures.
-   Copyright (C) 1990-2022 Free Software Foundation, Inc.
+   Copyright (C) 1990-2023 Free Software Foundation, Inc.
    Hacked by John Gilmore and Steve Chamberlain of Cygnus Support.
 
    This file is part of BFD, the Binary File Descriptor library.
@@ -173,6 +173,7 @@ DESCRIPTION
 .#define bfd_mach_mips16000		16000
 .#define bfd_mach_mips16		16
 .#define bfd_mach_mips5			5
+.#define bfd_mach_mips_allegrex		10111431 {* octal 'AL', 31.  *}
 .#define bfd_mach_mips_loongson_2e	3001
 .#define bfd_mach_mips_loongson_2f	3002
 .#define bfd_mach_mips_gs464		3003
@@ -205,12 +206,6 @@ DESCRIPTION
 .#define bfd_mach_i386_i386_intel_syntax (bfd_mach_i386_i386 | bfd_mach_i386_intel_syntax)
 .#define bfd_mach_x86_64_intel_syntax	(bfd_mach_x86_64 | bfd_mach_i386_intel_syntax)
 .#define bfd_mach_x64_32_intel_syntax	(bfd_mach_x64_32 | bfd_mach_i386_intel_syntax)
-.  bfd_arch_l1om,      {* Intel L1OM.  *}
-.#define bfd_mach_l1om			(1 << 5)
-.#define bfd_mach_l1om_intel_syntax	(bfd_mach_l1om | bfd_mach_i386_intel_syntax)
-.  bfd_arch_k1om,      {* Intel K1OM.  *}
-.#define bfd_mach_k1om			(1 << 6)
-.#define bfd_mach_k1om_intel_syntax	(bfd_mach_k1om | bfd_mach_i386_intel_syntax)
 .  bfd_arch_iamcu,     {* Intel MCU.  *}
 .#define bfd_mach_iamcu			(1 << 8)
 .#define bfd_mach_i386_iamcu		(bfd_mach_i386_i386 | bfd_mach_iamcu)
@@ -493,10 +488,6 @@ DESCRIPTION
 .#define bfd_mach_msp46		46
 .#define bfd_mach_msp47		47
 .#define bfd_mach_msp54		54
-.  bfd_arch_xc16x,     {* Infineon's XC16X Series.  *}
-.#define bfd_mach_xc16x		1
-.#define bfd_mach_xc16xl	2
-.#define bfd_mach_xc16xs	3
 .  bfd_arch_xgate,     {* Freescale XGATE.  *}
 .#define bfd_mach_xgate		1
 .  bfd_arch_xtensa,    {* Tensilica's Xtensa cores.  *}
@@ -524,6 +515,17 @@ DESCRIPTION
 .  bfd_arch_lm32,      {* Lattice Mico32.  *}
 .#define bfd_mach_lm32		1
 .  bfd_arch_microblaze,{* Xilinx MicroBlaze.  *}
+.  bfd_arch_kvx,        {* Kalray VLIW core of the MPPA processor family *}
+.#define bfd_mach_kv3_unknown       0
+.#define bfd_mach_kv3_1             1
+.#define bfd_mach_kv3_1_64          2
+.#define bfd_mach_kv3_1_usr         3
+.#define bfd_mach_kv3_2             4
+.#define bfd_mach_kv3_2_64          5
+.#define bfd_mach_kv3_2_usr         6
+.#define bfd_mach_kv4_1             7
+.#define bfd_mach_kv4_1_64          8
+.#define bfd_mach_kv4_1_usr         9
 .  bfd_arch_tilepro,   {* Tilera TILEPro.  *}
 .  bfd_arch_tilegx,    {* Tilera TILE-Gx.  *}
 .#define bfd_mach_tilepro	1
@@ -533,6 +535,7 @@ DESCRIPTION
 .#define bfd_mach_aarch64 0
 .#define bfd_mach_aarch64_8R	1
 .#define bfd_mach_aarch64_ilp32	32
+.#define bfd_mach_aarch64_llp64 64
 .  bfd_arch_nios2,     {* Nios II.  *}
 .#define bfd_mach_nios2		0
 .#define bfd_mach_nios2r1	1
@@ -650,8 +653,7 @@ extern const bfd_arch_info_type bfd_iamcu_arch;
 extern const bfd_arch_info_type bfd_ia64_arch;
 extern const bfd_arch_info_type bfd_ip2k_arch;
 extern const bfd_arch_info_type bfd_iq2000_arch;
-extern const bfd_arch_info_type bfd_k1om_arch;
-extern const bfd_arch_info_type bfd_l1om_arch;
+extern const bfd_arch_info_type bfd_kvx_arch;
 extern const bfd_arch_info_type bfd_lm32_arch;
 extern const bfd_arch_info_type bfd_loongarch_arch;
 extern const bfd_arch_info_type bfd_m32c_arch;
@@ -706,7 +708,6 @@ extern const bfd_arch_info_type bfd_visium_arch;
 extern const bfd_arch_info_type bfd_wasm32_arch;
 extern const bfd_arch_info_type bfd_xstormy16_arch;
 extern const bfd_arch_info_type bfd_xtensa_arch;
-extern const bfd_arch_info_type bfd_xc16x_arch;
 extern const bfd_arch_info_type bfd_xgate_arch;
 extern const bfd_arch_info_type bfd_z80_arch;
 extern const bfd_arch_info_type bfd_z8k_arch;
@@ -741,8 +742,7 @@ static const bfd_arch_info_type * const bfd_archures_list[] =
     &bfd_ia64_arch,
     &bfd_ip2k_arch,
     &bfd_iq2000_arch,
-    &bfd_k1om_arch,
-    &bfd_l1om_arch,
+    &bfd_kvx_arch,
     &bfd_lm32_arch,
     &bfd_loongarch_arch,
     &bfd_m32c_arch,
@@ -795,7 +795,6 @@ static const bfd_arch_info_type * const bfd_archures_list[] =
     &bfd_wasm32_arch,
     &bfd_xstormy16_arch,
     &bfd_xtensa_arch,
-    &bfd_xc16x_arch,
     &bfd_xgate_arch,
     &bfd_z80_arch,
     &bfd_z8k_arch,
@@ -962,6 +961,7 @@ DESCRIPTION
 	architecture of the file.
 
 .extern const bfd_arch_info_type bfd_default_arch_struct;
+.
 */
 
 const bfd_arch_info_type bfd_default_arch_struct =

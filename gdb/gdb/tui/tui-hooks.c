@@ -1,6 +1,6 @@
 /* GDB hooks for TUI.
 
-   Copyright (C) 2001-2022 Free Software Foundation, Inc.
+   Copyright (C) 2001-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -49,12 +49,19 @@
 
 #include "gdb_curses.h"
 
-static void
-tui_new_objfile_hook (struct objfile* objfile)
+static void tui_on_objfiles_changed ()
 {
   if (tui_active)
     tui_display_main ();
 }
+
+static void
+tui_new_objfile_hook (struct objfile* objfile)
+{ tui_on_objfiles_changed (); }
+
+static void
+tui_all_objfiles_removed (program_space *pspace)
+{ tui_on_objfiles_changed (); }
 
 /* Prevent recursion of deprecated_register_changed_hook().  */
 static bool tui_refreshing_registers = false;
@@ -62,9 +69,9 @@ static bool tui_refreshing_registers = false;
 /* Observer for the register_changed notification.  */
 
 static void
-tui_register_changed (struct frame_info *frame, int regno)
+tui_register_changed (frame_info_ptr frame, int regno)
 {
-  struct frame_info *fi;
+  frame_info_ptr fi;
 
   if (!tui_is_window_visible (DATA_WIN))
     return;
@@ -129,7 +136,7 @@ tui_refresh_frame_and_register_information ()
 
   if (from_stack && has_stack_frames ())
     {
-      struct frame_info *fi = get_selected_frame (NULL);
+      frame_info_ptr fi = get_selected_frame (NULL);
 
       /* Display the frame position (even if there is no symbols or
 	 the PC is not known).  */
@@ -283,4 +290,6 @@ _initialize_tui_hooks ()
 {
   /* Install the permanent hooks.  */
   gdb::observers::new_objfile.attach (tui_new_objfile_hook, "tui-hooks");
+  gdb::observers::all_objfiles_removed.attach (tui_all_objfiles_removed,
+					       "tui-hooks");
 }

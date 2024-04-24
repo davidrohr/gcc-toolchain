@@ -1,6 +1,6 @@
 /* DWARF DWZ handling for GDB.
 
-   Copyright (C) 2003-2022 Free Software Foundation, Inc.
+   Copyright (C) 2003-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -48,6 +48,7 @@ struct dwz_file
   struct dwarf2_section_info macro {};
   struct dwarf2_section_info gdb_index {};
   struct dwarf2_section_info debug_names {};
+  struct dwarf2_section_info types {};
 
   /* The dwz's BFD.  */
   gdb_bfd_ref_ptr dwz_bfd;

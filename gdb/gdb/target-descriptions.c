@@ -1,6 +1,6 @@
 /* Target description support for GDB.
 
-   Copyright (C) 2006-2022 Free Software Foundation, Inc.
+   Copyright (C) 2006-2023 Free Software Foundation, Inc.
 
    Contributed by CodeSourcery.
 
@@ -35,7 +35,7 @@
 #include "inferior.h"
 #include <algorithm>
 #include "completer.h"
-#include "readline/tilde.h" /* tilde_expand */
+#include "readline/tilde.h"
 
 /* Types.  */
 
@@ -116,40 +116,40 @@ make_gdb_type (struct gdbarch *gdbarch, struct tdesc_type *ttype)
       if (m_type != NULL)
 	return;
 
+      type_allocator alloc (m_gdbarch);
       switch (e->kind)
 	{
 	case TDESC_TYPE_IEEE_HALF:
-	  m_type = arch_float_type (m_gdbarch, -1, "builtin_type_ieee_half",
+	  m_type = init_float_type (alloc, -1, "builtin_type_ieee_half",
 				    floatformats_ieee_half);
 	  return;
 
 	case TDESC_TYPE_IEEE_SINGLE:
-	  m_type = arch_float_type (m_gdbarch, -1, "builtin_type_ieee_single",
+	  m_type = init_float_type (alloc, -1, "builtin_type_ieee_single",
 				    floatformats_ieee_single);
 	  return;
 
 	case TDESC_TYPE_IEEE_DOUBLE:
-	  m_type = arch_float_type (m_gdbarch, -1, "builtin_type_ieee_double",
+	  m_type = init_float_type (alloc, -1, "builtin_type_ieee_double",
 				    floatformats_ieee_double);
 	  return;
 	case TDESC_TYPE_ARM_FPA_EXT:
-	  m_type = arch_float_type (m_gdbarch, -1, "builtin_type_arm_ext",
+	  m_type = init_float_type (alloc, -1, "builtin_type_arm_ext",
 				    floatformats_arm_ext);
 	  return;
 
 	case TDESC_TYPE_I387_EXT:
-	  m_type = arch_float_type (m_gdbarch, -1, "builtin_type_i387_ext",
+	  m_type = init_float_type (alloc, -1, "builtin_type_i387_ext",
 				    floatformats_i387_ext);
 	  return;
 
 	case TDESC_TYPE_BFLOAT16:
-	  m_type = arch_float_type (m_gdbarch, -1, "builtin_type_bfloat16",
+	  m_type = init_float_type (alloc, -1, "builtin_type_bfloat16",
 				    floatformats_bfloat16);
 	  return;
 	}
 
-      internal_error (__FILE__, __LINE__,
-		      "Type \"%s\" has an unknown kind %d",
+      internal_error ("Type \"%s\" has an unknown kind %d",
 		      e->name.c_str (), e->kind);
     }
 
@@ -187,8 +187,7 @@ make_gdb_type (struct gdbarch *gdbarch, struct tdesc_type *ttype)
 	  return;
 	}
 
-      internal_error (__FILE__, __LINE__,
-		      "Type \"%s\" has an unknown kind %d",
+      internal_error ("Type \"%s\" has an unknown kind %d",
 		      e->name.c_str (), e->kind);
     }
 
@@ -233,7 +232,7 @@ make_gdb_type (struct gdbarch *gdbarch, struct tdesc_type *ttype)
 		fld->set_loc_bitpos (total_size - f.start - bitsize);
 	      else
 		fld->set_loc_bitpos (f.start);
-	      FIELD_BITSIZE (fld[0]) = bitsize;
+	      fld->set_bitsize (bitsize);
 	    }
 	  else
 	    {
@@ -246,7 +245,7 @@ make_gdb_type (struct gdbarch *gdbarch, struct tdesc_type *ttype)
 	}
 
       if (e->size != 0)
-	TYPE_LENGTH (m_type) = e->size;
+	m_type->set_length (e->size);
     }
 
     void make_gdb_type_union (const tdesc_type_with_fields *e)
@@ -286,8 +285,9 @@ make_gdb_type (struct gdbarch *gdbarch, struct tdesc_type *ttype)
 
     void make_gdb_type_enum (const tdesc_type_with_fields *e)
     {
-      m_type = arch_type (m_gdbarch, TYPE_CODE_ENUM, e->size * TARGET_CHAR_BIT,
-			  e->name.c_str ());
+      m_type = (type_allocator (m_gdbarch)
+		.new_type (TYPE_CODE_ENUM, e->size * TARGET_CHAR_BIT,
+			   e->name.c_str ()));
 
       m_type->set_is_unsigned (true);
 
@@ -438,74 +438,19 @@ struct tdesc_arch_data
   gdbarch_register_reggroup_p_ftype *pseudo_register_reggroup_p = NULL;
 };
 
-/* Info about an inferior's target description.  There's one of these
-   for each inferior.  */
-
-struct target_desc_info
-{
-  /* A flag indicating that a description has already been fetched
-     from the target, so it should not be queried again.  */
-
-  bool fetched = false;
-
-  /* The description fetched from the target, or NULL if the target
-     did not supply any description.  Only valid when
-     FETCHED is set.  Only the description initialization
-     code should access this; normally, the description should be
-     accessed through the gdbarch object.  */
-
-  const struct target_desc *tdesc = nullptr;
-
-  /* If not empty, the filename to read a target description from, as set by
-     "set tdesc filename ...".
-
-     If empty, there is not filename specified by the user.  */
-
-  std::string filename;
-};
-
-/* Get the inferior INF's target description info, allocating one on
-   the stop if necessary.  */
-
-static struct target_desc_info *
-get_tdesc_info (struct inferior *inf)
-{
-  if (inf->tdesc_info == NULL)
-    inf->tdesc_info = new target_desc_info;
-
-  return inf->tdesc_info;
-}
-
 /* A handle for architecture-specific data associated with the
    target description (see struct tdesc_arch_data).  */
 
-static struct gdbarch_data *tdesc_data;
+static const registry<gdbarch>::key<tdesc_arch_data> tdesc_data;
 
-/* See target-descriptions.h.  */
-
-int
-target_desc_info_from_user_p (struct target_desc_info *info)
+/* Get or create the tdesc_data.  */
+static tdesc_arch_data *
+get_arch_data (struct gdbarch *gdbarch)
 {
-  return info != nullptr && !info->filename.empty ();
-}
-
-/* See target-descriptions.h.  */
-
-void
-copy_inferior_target_desc_info (struct inferior *destinf, struct inferior *srcinf)
-{
-  struct target_desc_info *src = get_tdesc_info (srcinf);
-  struct target_desc_info *dest = get_tdesc_info (destinf);
-
-  *dest = *src;
-}
-
-/* See target-descriptions.h.  */
-
-void
-target_desc_info_free (struct target_desc_info *tdesc_info)
-{
-  delete tdesc_info;
+  tdesc_arch_data *result = tdesc_data.get (gdbarch);
+  if (result == nullptr)
+    result = tdesc_data.emplace (gdbarch);
+  return result;
 }
 
 /* The string manipulated by the "set tdesc filename ..." command.  */
@@ -518,7 +463,7 @@ static std::string tdesc_filename_cmd_string;
 void
 target_find_description (void)
 {
-  target_desc_info *tdesc_info = get_tdesc_info (current_inferior ());
+  target_desc_info *tdesc_info = &current_inferior ()->tdesc_info;
 
   /* If we've already fetched a description from the target, don't do
      it again.  This allows a target to fetch the description early,
@@ -557,13 +502,15 @@ target_find_description (void)
 
       info.target_desc = tdesc_info->tdesc;
       if (!gdbarch_update_p (info))
-	warning (_("Architecture rejected target-supplied description"));
+	{
+	  warning (_("Architecture rejected target-supplied description"));
+	  tdesc_info->tdesc = nullptr;
+	}
       else
 	{
 	  struct tdesc_arch_data *data;
 
-	  data = ((struct tdesc_arch_data *)
-		  gdbarch_data (target_gdbarch (), tdesc_data));
+	  data = get_arch_data (target_gdbarch ());
 	  if (tdesc_has_registers (tdesc_info->tdesc)
 	      && data->arch_regs.empty ())
 	    warning (_("Target-supplied registers are not supported "
@@ -582,7 +529,7 @@ target_find_description (void)
 void
 target_clear_description (void)
 {
-  target_desc_info *tdesc_info = get_tdesc_info (current_inferior ());
+  target_desc_info *tdesc_info = &current_inferior ()->tdesc_info;
 
   if (!tdesc_info->fetched)
     return;
@@ -592,8 +539,7 @@ target_clear_description (void)
 
   gdbarch_info info;
   if (!gdbarch_update_p (info))
-    internal_error (__FILE__, __LINE__,
-		    _("Could not remove target-supplied description"));
+    internal_error (_("Could not remove target-supplied description"));
 }
 
 /* Return the global current target description.  This should only be
@@ -603,7 +549,7 @@ target_clear_description (void)
 const struct target_desc *
 target_current_description (void)
 {
-  target_desc_info *tdesc_info = get_tdesc_info (current_inferior ());
+  target_desc_info *tdesc_info = &current_inferior ()->tdesc_info;
 
   if (tdesc_info->fetched)
     return tdesc_info->tdesc;
@@ -742,8 +688,7 @@ tdesc_feature_name (const struct tdesc_feature *feature)
 struct type *
 tdesc_find_type (struct gdbarch *gdbarch, const char *id)
 {
-  tdesc_arch_data *data
-    = (struct tdesc_arch_data *) gdbarch_data (gdbarch, tdesc_data);
+  tdesc_arch_data *data = get_arch_data (gdbarch);
 
   for (const tdesc_arch_reg &reg : data->arch_regs)
     {
@@ -760,15 +705,6 @@ tdesc_find_type (struct gdbarch *gdbarch, const char *id)
 /* Support for registers from target descriptions.  */
 
 /* Construct the per-gdbarch data.  */
-
-static void *
-tdesc_data_init (struct obstack *obstack)
-{
-  return obstack_new<tdesc_arch_data> (obstack);
-}
-
-/* Similar, but for the temporary copy used during architecture
-   initialization.  */
 
 tdesc_arch_data_up
 tdesc_data_alloc (void)
@@ -850,6 +786,17 @@ tdesc_numbered_register_choices (const struct tdesc_feature *feature,
   return 0;
 }
 
+/* See target-descriptions.h.  */
+
+bool
+tdesc_found_register (struct tdesc_arch_data *data, int regno)
+{
+  gdb_assert (regno >= 0);
+
+  return (regno < data->arch_regs.size ()
+	  && data->arch_regs[regno].reg != nullptr);
+}
+
 /* Search FEATURE for a register named NAME, and return its size in
    bits.  The register must exist.  */
 
@@ -867,9 +814,8 @@ tdesc_register_bitsize (const struct tdesc_feature *feature, const char *name)
 static struct tdesc_arch_reg *
 tdesc_find_arch_register (struct gdbarch *gdbarch, int regno)
 {
-  struct tdesc_arch_data *data;
+  struct tdesc_arch_data *data = get_arch_data (gdbarch);
 
-  data = (struct tdesc_arch_data *) gdbarch_data (gdbarch, tdesc_data);
   if (regno < data->arch_regs.size ())
     return &data->arch_regs[regno];
   else
@@ -898,8 +844,7 @@ tdesc_register_name (struct gdbarch *gdbarch, int regno)
 
   if (regno >= num_regs && regno < gdbarch_num_cooked_regs (gdbarch))
     {
-      struct tdesc_arch_data *data
-	= (struct tdesc_arch_data *) gdbarch_data (gdbarch, tdesc_data);
+      struct tdesc_arch_data *data = get_arch_data (gdbarch);
 
       gdb_assert (data->pseudo_register_name != NULL);
       return data->pseudo_register_name (gdbarch, regno);
@@ -918,8 +863,7 @@ tdesc_register_type (struct gdbarch *gdbarch, int regno)
 
   if (reg == NULL && regno >= num_regs && regno < num_regs + num_pseudo_regs)
     {
-      struct tdesc_arch_data *data
-	= (struct tdesc_arch_data *) gdbarch_data (gdbarch, tdesc_data);
+      struct tdesc_arch_data *data = get_arch_data (gdbarch);
 
       gdb_assert (data->pseudo_register_type != NULL);
       return data->pseudo_register_type (gdbarch, regno);
@@ -975,8 +919,7 @@ tdesc_register_type (struct gdbarch *gdbarch, int regno)
 	}
 
       if (arch_reg->type == NULL)
-	internal_error (__FILE__, __LINE__,
-			"Register \"%s\" has an unknown type \"%s\"",
+	internal_error ("Register \"%s\" has an unknown type \"%s\"",
 			reg->name.c_str (), reg->type.c_str ());
     }
 
@@ -1007,12 +950,12 @@ tdesc_remote_register_number (struct gdbarch *gdbarch, int regno)
 
 int
 tdesc_register_in_reggroup_p (struct gdbarch *gdbarch, int regno,
-			      struct reggroup *reggroup)
+			      const struct reggroup *reggroup)
 {
   struct tdesc_reg *reg = tdesc_find_register (gdbarch, regno);
 
   if (reg != NULL && !reg->group.empty ()
-      && (reg->group == reggroup_name (reggroup)))
+      && (reg->group == reggroup->name ()))
 	return 1;
 
   if (reg != NULL
@@ -1028,7 +971,7 @@ tdesc_register_in_reggroup_p (struct gdbarch *gdbarch, int regno,
 
 static int
 tdesc_register_reggroup_p (struct gdbarch *gdbarch, int regno,
-			   struct reggroup *reggroup)
+			   const struct reggroup *reggroup)
 {
   int num_regs = gdbarch_num_regs (gdbarch);
   int num_pseudo_regs = gdbarch_num_pseudo_regs (gdbarch);
@@ -1036,8 +979,7 @@ tdesc_register_reggroup_p (struct gdbarch *gdbarch, int regno,
 
   if (regno >= num_regs && regno < num_regs + num_pseudo_regs)
     {
-      struct tdesc_arch_data *data
-	= (struct tdesc_arch_data *) gdbarch_data (gdbarch, tdesc_data);
+      struct tdesc_arch_data *data = get_arch_data (gdbarch);
 
       if (data->pseudo_register_reggroup_p != NULL)
 	return data->pseudo_register_reggroup_p (gdbarch, regno, reggroup);
@@ -1058,8 +1000,7 @@ void
 set_tdesc_pseudo_register_name (struct gdbarch *gdbarch,
 				gdbarch_register_name_ftype *pseudo_name)
 {
-  struct tdesc_arch_data *data
-    = (struct tdesc_arch_data *) gdbarch_data (gdbarch, tdesc_data);
+  struct tdesc_arch_data *data = get_arch_data (gdbarch);
 
   data->pseudo_register_name = pseudo_name;
 }
@@ -1068,8 +1009,7 @@ void
 set_tdesc_pseudo_register_type (struct gdbarch *gdbarch,
 				gdbarch_register_type_ftype *pseudo_type)
 {
-  struct tdesc_arch_data *data
-    = (struct tdesc_arch_data *) gdbarch_data (gdbarch, tdesc_data);
+  struct tdesc_arch_data *data = get_arch_data (gdbarch);
 
   data->pseudo_register_type = pseudo_type;
 }
@@ -1079,8 +1019,7 @@ set_tdesc_pseudo_register_reggroup_p
   (struct gdbarch *gdbarch,
    gdbarch_register_reggroup_p_ftype *pseudo_reggroup_p)
 {
-  struct tdesc_arch_data *data
-    = (struct tdesc_arch_data *) gdbarch_data (gdbarch, tdesc_data);
+  struct tdesc_arch_data *data = get_arch_data (gdbarch);
 
   data->pseudo_register_reggroup_p = pseudo_reggroup_p;
 }
@@ -1102,7 +1041,7 @@ tdesc_use_registers (struct gdbarch *gdbarch,
      included.  */
   gdb_assert (tdesc_has_registers (target_desc));
 
-  data = (struct tdesc_arch_data *) gdbarch_data (gdbarch, tdesc_data);
+  data = get_arch_data (gdbarch);
   data->arch_regs = std::move (early_data->arch_regs);
 
   /* Build up a set of all registers, so that we can assign register
@@ -1224,8 +1163,7 @@ tdesc_add_compatible (struct target_desc *target_desc,
 
   for (const tdesc_compatible_info_up &compat : target_desc->compatible)
     if (compat->arch () == compatible)
-      internal_error (__FILE__, __LINE__,
-		      _("Attempted to add duplicate "
+      internal_error (_("Attempted to add duplicate "
 			"compatible architecture \"%s\""),
 		      compatible->printable_name);
 
@@ -1241,8 +1179,7 @@ set_tdesc_property (struct target_desc *target_desc,
   gdb_assert (key != NULL && value != NULL);
 
   if (tdesc_property (target_desc, key) != NULL)
-    internal_error (__FILE__, __LINE__,
-		    _("Attempted to add duplicate property \"%s\""), key);
+    internal_error (_("Attempted to add duplicate property \"%s\""), key);
 
   target_desc->properties.emplace_back (key, value);
 }
@@ -1287,7 +1224,7 @@ static void
 set_tdesc_filename_cmd (const char *args, int from_tty,
 			struct cmd_list_element *c)
 {
-  target_desc_info *tdesc_info = get_tdesc_info (current_inferior ());
+  target_desc_info *tdesc_info = &current_inferior ()->tdesc_info;
 
   tdesc_info->filename = tdesc_filename_cmd_string;
 
@@ -1300,22 +1237,22 @@ show_tdesc_filename_cmd (struct ui_file *file, int from_tty,
 			 struct cmd_list_element *c,
 			 const char *value)
 {
-  value = get_tdesc_info (current_inferior ())->filename.data ();
+  value = current_inferior ()->tdesc_info.filename.data ();
 
   if (value != NULL && *value != '\0')
-    fprintf_filtered (file,
-		      _("The target description will be read from \"%s\".\n"),
-		      value);
+    gdb_printf (file,
+		_("The target description will be read from \"%s\".\n"),
+		value);
   else
-    fprintf_filtered (file,
-		      _("The target description will be "
-			"read from the target.\n"));
+    gdb_printf (file,
+		_("The target description will be "
+		  "read from the target.\n"));
 }
 
 static void
 unset_tdesc_filename_cmd (const char *args, int from_tty)
 {
-  target_desc_info *tdesc_info = get_tdesc_info (current_inferior ());
+  target_desc_info *tdesc_info = &current_inferior ()->tdesc_info;
 
   tdesc_info->filename.clear ();
   target_clear_description ();
@@ -1347,9 +1284,9 @@ public:
     *outp = '\0';
 
     /* Standard boilerplate.  */
-    printf_filtered ("/* THIS FILE IS GENERATED.  "
-		       "-*- buffer-read-only: t -*- vi"
-		       ":set ro:\n");
+    gdb_printf ("/* THIS FILE IS GENERATED.  "
+		"-*- buffer-read-only: t -*- vi"
+		":set ro:\n");
   }
 
   ~print_c_tdesc ()
@@ -1359,56 +1296,56 @@ public:
 
   void visit_pre (const target_desc *e) override
   {
-    printf_filtered ("  Original: %s */\n\n",
-		     lbasename (m_filename_after_features.c_str ()));
+    gdb_printf ("  Original: %s */\n\n",
+		lbasename (m_filename_after_features.c_str ()));
 
-    printf_filtered ("#include \"defs.h\"\n");
-    printf_filtered ("#include \"osabi.h\"\n");
-    printf_filtered ("#include \"target-descriptions.h\"\n");
-    printf_filtered ("\n");
+    gdb_printf ("#include \"defs.h\"\n");
+    gdb_printf ("#include \"osabi.h\"\n");
+    gdb_printf ("#include \"target-descriptions.h\"\n");
+    gdb_printf ("\n");
 
-    printf_filtered ("struct target_desc *tdesc_%s;\n", m_function);
-    printf_filtered ("static void\n");
-    printf_filtered ("initialize_tdesc_%s (void)\n", m_function);
-    printf_filtered ("{\n");
-    printf_filtered
+    gdb_printf ("const struct target_desc *tdesc_%s;\n", m_function);
+    gdb_printf ("static void\n");
+    gdb_printf ("initialize_tdesc_%s (void)\n", m_function);
+    gdb_printf ("{\n");
+    gdb_printf
       ("  target_desc_up result = allocate_target_description ();\n");
 
     if (tdesc_architecture (e) != NULL)
       {
-	printf_filtered
+	gdb_printf
 	  ("  set_tdesc_architecture (result.get (), bfd_scan_arch (\"%s\"));\n",
 	   tdesc_architecture (e)->printable_name);
-	printf_filtered ("\n");
+	gdb_printf ("\n");
       }
     if (tdesc_osabi (e) > GDB_OSABI_UNKNOWN
 	&& tdesc_osabi (e) < GDB_OSABI_INVALID)
       {
-	printf_filtered
+	gdb_printf
 	  ("  set_tdesc_osabi (result.get (), osabi_from_tdesc_string (\"%s\"));\n",
 	   gdbarch_osabi_name (tdesc_osabi (e)));
-	printf_filtered ("\n");
+	gdb_printf ("\n");
       }
 
     for (const tdesc_compatible_info_up &compatible : e->compatible)
-      printf_filtered
+      gdb_printf
 	("  tdesc_add_compatible (result.get (), bfd_scan_arch (\"%s\"));\n",
 	 compatible->arch ()->printable_name);
 
     if (!e->compatible.empty ())
-      printf_filtered ("\n");
+      gdb_printf ("\n");
 
     for (const property &prop : e->properties)
-      printf_filtered ("  set_tdesc_property (result.get (), \"%s\", \"%s\");\n",
-		       prop.key.c_str (), prop.value.c_str ());
+      gdb_printf ("  set_tdesc_property (result.get (), \"%s\", \"%s\");\n",
+		  prop.key.c_str (), prop.value.c_str ());
 
-    printf_filtered ("  struct tdesc_feature *feature;\n");
+    gdb_printf ("  struct tdesc_feature *feature;\n");
   }
 
   void visit_pre (const tdesc_feature *e) override
   {
-    printf_filtered ("\n  feature = tdesc_create_feature (result.get (), \"%s\");\n",
-		     e->name.c_str ());
+    gdb_printf ("\n  feature = tdesc_create_feature (result.get (), \"%s\");\n",
+		e->name.c_str ());
   }
 
   void visit_post (const tdesc_feature *e) override
@@ -1416,8 +1353,8 @@ public:
 
   void visit_post (const target_desc *e) override
   {
-    printf_filtered ("\n  tdesc_%s = result.release ();\n", m_function);
-    printf_filtered ("}\n");
+    gdb_printf ("\n  tdesc_%s = result.release ();\n", m_function);
+    gdb_printf ("}\n");
   }
 
   void visit (const tdesc_type_builtin *type) override
@@ -1429,25 +1366,25 @@ public:
   {
     if (!m_printed_element_type)
       {
-	printf_filtered ("  tdesc_type *element_type;\n");
+	gdb_printf ("  tdesc_type *element_type;\n");
 	m_printed_element_type = true;
       }
 
-    printf_filtered
+    gdb_printf
       ("  element_type = tdesc_named_type (feature, \"%s\");\n",
        type->element_type->name.c_str ());
-    printf_filtered
+    gdb_printf
       ("  tdesc_create_vector (feature, \"%s\", element_type, %d);\n",
        type->name.c_str (), type->count);
 
-    printf_filtered ("\n");
+    gdb_printf ("\n");
   }
 
   void visit (const tdesc_type_with_fields *type) override
   {
     if (!m_printed_type_with_fields)
       {
-	printf_filtered ("  tdesc_type_with_fields *type_with_fields;\n");
+	gdb_printf ("  tdesc_type_with_fields *type_with_fields;\n");
 	m_printed_type_with_fields = true;
       }
 
@@ -1457,16 +1394,16 @@ public:
       case TDESC_TYPE_FLAGS:
 	if (type->kind == TDESC_TYPE_STRUCT)
 	  {
-	    printf_filtered
+	    gdb_printf
 	      ("  type_with_fields = tdesc_create_struct (feature, \"%s\");\n",
 	       type->name.c_str ());
 	    if (type->size != 0)
-	      printf_filtered
+	      gdb_printf
 		("  tdesc_set_struct_size (type_with_fields, %d);\n", type->size);
 	  }
 	else
 	  {
-	    printf_filtered
+	    gdb_printf
 	      ("  type_with_fields = tdesc_create_flags (feature, \"%s\", %d);\n",
 	       type->name.c_str (), type->size);
 	  }
@@ -1485,7 +1422,7 @@ public:
 		if (f.type->kind == TDESC_TYPE_BOOL)
 		  {
 		    gdb_assert (f.start == f.end);
-		    printf_filtered
+		    gdb_printf
 		      ("  tdesc_add_flag (type_with_fields, %d, \"%s\");\n",
 		       f.start, f.name.c_str ());
 		  }
@@ -1493,7 +1430,7 @@ public:
 			 || (type->size == 8
 			     && f.type->kind == TDESC_TYPE_UINT64))
 		  {
-		    printf_filtered
+		    gdb_printf
 		      ("  tdesc_add_bitfield (type_with_fields, \"%s\", %d, %d);\n",
 		       f.name.c_str (), f.start, f.end);
 		  }
@@ -1502,7 +1439,7 @@ public:
 		    printf_field_type_assignment
 		      ("tdesc_named_type (feature, \"%s\");\n",
 		       type_name);
-		    printf_filtered
+		    gdb_printf
 		      ("  tdesc_add_typed_bitfield (type_with_fields, \"%s\","
 		       " %d, %d, field_type);\n",
 		       f.name.c_str (), f.start, f.end);
@@ -1514,31 +1451,31 @@ public:
 		gdb_assert (type->kind == TDESC_TYPE_STRUCT);
 		printf_field_type_assignment
 		  ("tdesc_named_type (feature, \"%s\");\n", type_name);
-		printf_filtered
+		gdb_printf
 		  ("  tdesc_add_field (type_with_fields, \"%s\", field_type);\n",
 		   f.name.c_str ());
 	      }
 	  }
 	break;
       case TDESC_TYPE_UNION:
-	printf_filtered
+	gdb_printf
 	  ("  type_with_fields = tdesc_create_union (feature, \"%s\");\n",
 	   type->name.c_str ());
 	for (const tdesc_type_field &f : type->fields)
 	  {
 	    printf_field_type_assignment
 	      ("tdesc_named_type (feature, \"%s\");\n", f.type->name.c_str ());
-	    printf_filtered
+	    gdb_printf
 	      ("  tdesc_add_field (type_with_fields, \"%s\", field_type);\n",
 	       f.name.c_str ());
 	  }
 	break;
       case TDESC_TYPE_ENUM:
-	printf_filtered
+	gdb_printf
 	  ("  type_with_fields = tdesc_create_enum (feature, \"%s\", %d);\n",
 	   type->name.c_str (), type->size);
 	for (const tdesc_type_field &f : type->fields)
-	  printf_filtered
+	  gdb_printf
 	    ("  tdesc_add_enum_value (type_with_fields, %d, \"%s\");\n",
 	     f.start, f.name.c_str ());
 	break;
@@ -1546,19 +1483,19 @@ public:
 	error (_("C output is not supported type \"%s\"."), type->name.c_str ());
       }
 
-    printf_filtered ("\n");
+    gdb_printf ("\n");
   }
 
   void visit (const tdesc_reg *reg) override
   {
-    printf_filtered ("  tdesc_create_reg (feature, \"%s\", %ld, %d, ",
-		     reg->name.c_str (), reg->target_regnum,
-		     reg->save_restore);
+    gdb_printf ("  tdesc_create_reg (feature, \"%s\", %ld, %d, ",
+		reg->name.c_str (), reg->target_regnum,
+		reg->save_restore);
     if (!reg->group.empty ())
-      printf_filtered ("\"%s\", ", reg->group.c_str ());
+      gdb_printf ("\"%s\", ", reg->group.c_str ());
     else
-      printf_filtered ("NULL, ");
-    printf_filtered ("%d, \"%s\");\n", reg->bitsize, reg->type.c_str ());
+      gdb_printf ("NULL, ");
+    gdb_printf ("%d, \"%s\");\n", reg->bitsize, reg->type.c_str ());
   }
 
 protected:
@@ -1573,15 +1510,15 @@ private:
   {
     if (!m_printed_field_type)
       {
-	printf_filtered ("  tdesc_type *field_type;\n");
+	gdb_printf ("  tdesc_type *field_type;\n");
 	m_printed_field_type = true;
       }
 
-    printf_filtered ("  field_type = ");
+    gdb_printf ("  field_type = ");
 
     va_list args;
     va_start (args, fmt);
-    vprintf_filtered (fmt, args);
+    gdb_vprintf (fmt, args);
     va_end (args);
   }
 
@@ -1613,11 +1550,11 @@ public:
 
   void visit_pre (const target_desc *e) override
   {
-    printf_filtered ("  Original: %s */\n\n",
-		     lbasename (m_filename_after_features.c_str ()));
+    gdb_printf ("  Original: %s */\n\n",
+		lbasename (m_filename_after_features.c_str ()));
 
-    printf_filtered ("#include \"gdbsupport/tdesc.h\"\n");
-    printf_filtered ("\n");
+    gdb_printf ("#include \"gdbsupport/tdesc.h\"\n");
+    gdb_printf ("\n");
   }
 
   void visit_post (const target_desc *e) override
@@ -1633,22 +1570,22 @@ public:
     std::replace (name.begin (), name.end (), '/', '_');
     std::replace (name.begin (), name.end (), '-', '_');
 
-    printf_filtered ("static int\n");
-    printf_filtered ("create_feature_%s ", name.c_str ());
-    printf_filtered ("(struct target_desc *result, long regnum)\n");
+    gdb_printf ("static int\n");
+    gdb_printf ("create_feature_%s ", name.c_str ());
+    gdb_printf ("(struct target_desc *result, long regnum)\n");
 
-    printf_filtered ("{\n");
-    printf_filtered ("  struct tdesc_feature *feature;\n");
+    gdb_printf ("{\n");
+    gdb_printf ("  struct tdesc_feature *feature;\n");
 
-    printf_filtered
+    gdb_printf
       ("\n  feature = tdesc_create_feature (result, \"%s\");\n",
        e->name.c_str ());
   }
 
   void visit_post (const tdesc_feature *e) override
   {
-    printf_filtered ("  return regnum;\n");
-    printf_filtered ("}\n");
+    gdb_printf ("  return regnum;\n");
+    gdb_printf ("}\n");
   }
 
   void visit (const tdesc_reg *reg) override
@@ -1681,27 +1618,27 @@ public:
 	  and also print the message so that it can be saved in the
 	  generated c file.  */
 
-	printf_filtered ("ERROR: \"regnum\" attribute %ld ",
-			 reg->target_regnum);
-	printf_filtered ("is not the largest number (%d).\n",
-			 m_next_regnum);
+	gdb_printf ("ERROR: \"regnum\" attribute %ld ",
+		    reg->target_regnum);
+	gdb_printf ("is not the largest number (%d).\n",
+		    m_next_regnum);
 	error (_("\"regnum\" attribute %ld is not the largest number (%d)."),
 	       reg->target_regnum, m_next_regnum);
       }
 
     if (reg->target_regnum > m_next_regnum)
       {
-	printf_filtered ("  regnum = %ld;\n", reg->target_regnum);
+	gdb_printf ("  regnum = %ld;\n", reg->target_regnum);
 	m_next_regnum = reg->target_regnum;
       }
 
-    printf_filtered ("  tdesc_create_reg (feature, \"%s\", regnum++, %d, ",
-		     reg->name.c_str (), reg->save_restore);
+    gdb_printf ("  tdesc_create_reg (feature, \"%s\", regnum++, %d, ",
+		reg->name.c_str (), reg->save_restore);
     if (!reg->group.empty ())
-      printf_filtered ("\"%s\", ", reg->group.c_str ());
+      gdb_printf ("\"%s\", ", reg->group.c_str ());
     else
-      printf_filtered ("NULL, ");
-    printf_filtered ("%d, \"%s\");\n", reg->bitsize, reg->type.c_str ());
+      gdb_printf ("NULL, ");
+    gdb_printf ("%d, \"%s\");\n", reg->bitsize, reg->type.c_str ());
 
     m_next_regnum++;
   }
@@ -1771,7 +1708,7 @@ maint_print_c_tdesc_cmd (const char *args, int from_tty)
 	 architecture's.  This lets a GDB for one architecture generate C
 	 for another architecture's description, even though the gdbarch
 	 initialization code will reject the new description.  */
-      target_desc_info *tdesc_info = get_tdesc_info (current_inferior ());
+      target_desc_info *tdesc_info = &current_inferior ()->tdesc_info;
       tdesc = tdesc_info->tdesc;
       filename = tdesc_info->filename.data ();
     }
@@ -1844,7 +1781,7 @@ maint_print_xml_tdesc_cmd (const char *args, int from_tty)
 	 architecture's.  This lets a GDB for one architecture generate XML
 	 for another architecture's description, even though the gdbarch
 	 initialization code will reject the new description.  */
-      tdesc = get_tdesc_info (current_inferior ())->tdesc;
+      tdesc = current_inferior ()->tdesc_info.tdesc;
     }
   else
     {
@@ -1858,7 +1795,7 @@ maint_print_xml_tdesc_cmd (const char *args, int from_tty)
   std::string buf;
   print_xml_feature v (&buf);
   tdesc->accept (v);
-  puts_filtered (buf.c_str ());
+  gdb_puts (buf.c_str ());
 }
 
 namespace selftests {
@@ -1900,8 +1837,8 @@ maintenance_check_tdesc_xml_convert (const target_desc *tdesc, const char *name)
 
   if (xml == nullptr || *xml != '@')
     {
-      printf_filtered (_("Could not convert description for %s to xml.\n"),
-		       name);
+      gdb_printf (_("Could not convert description for %s to xml.\n"),
+		  name);
       return false;
     }
 
@@ -1909,14 +1846,14 @@ maintenance_check_tdesc_xml_convert (const target_desc *tdesc, const char *name)
 
   if (tdesc_trans == nullptr)
     {
-      printf_filtered (_("Could not convert description for %s from xml.\n"),
-		       name);
+      gdb_printf (_("Could not convert description for %s from xml.\n"),
+		  name);
       return false;
     }
   else if (*tdesc != *tdesc_trans)
     {
-      printf_filtered (_("Converted description for %s does not match.\n"),
-		       name);
+      gdb_printf (_("Converted description for %s does not match.\n"),
+		  name);
       return false;
     }
   return true;
@@ -1945,15 +1882,15 @@ maintenance_check_xml_descriptions (const char *dir, int from_tty)
 
       if (tdesc == NULL || *tdesc != *e.tdesc)
 	{
-	  printf_filtered ( _("Descriptions for %s do not match.\n"), e.name);
+	  gdb_printf ( _("Descriptions for %s do not match.\n"), e.name);
 	  failed++;
 	}
       else if (!maintenance_check_tdesc_xml_convert (tdesc, e.name)
 	       || !maintenance_check_tdesc_xml_convert (e.tdesc.get (), e.name))
 	failed++;
     }
-  printf_filtered (_("Tested %lu XML files, %d failed\n"),
-		   (long) selftests::xml_tdesc.size (), failed);
+  gdb_printf (_("Tested %lu XML files, %d failed\n"),
+	      (long) selftests::xml_tdesc.size (), failed);
 }
 
 void _initialize_target_descriptions ();
@@ -1961,8 +1898,6 @@ void
 _initialize_target_descriptions ()
 {
   cmd_list_element *cmd;
-
-  tdesc_data = gdbarch_data_register_pre_init (tdesc_data_init);
 
   add_setshow_prefix_cmd ("tdesc", class_maintenance,
 			  _("Set target description specific variables."),

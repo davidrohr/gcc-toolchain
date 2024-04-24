@@ -1,6 +1,6 @@
 /* Perform an inferior function call, for GDB, the GNU debugger.
 
-   Copyright (C) 1986-2022 Free Software Foundation, Inc.
+   Copyright (C) 1986-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -38,11 +38,40 @@
 #include "event-top.h"
 #include "observable.h"
 #include "top.h"
+#include "ui.h"
 #include "interps.h"
 #include "thread-fsm.h"
 #include <algorithm>
 #include "gdbsupport/scope-exit.h"
 #include <list>
+
+/* True if we are debugging inferior calls.  */
+
+static bool debug_infcall = false;
+
+/* Print an "infcall" debug statement.  */
+
+#define infcall_debug_printf(fmt, ...) \
+  debug_prefixed_printf_cond (debug_infcall, "infcall", fmt, ##__VA_ARGS__)
+
+/* Print "infcall" enter/exit debug statements.  */
+
+#define INFCALL_SCOPED_DEBUG_ENTER_EXIT \
+  scoped_debug_enter_exit (debug_infcall, "infcall")
+
+/* Print "infcall" start/end debug statements.  */
+
+#define INFCALL_SCOPED_DEBUG_START_END(fmt, ...) \
+  scoped_debug_start_end (debug_infrun, "infcall", fmt, ##__VA_ARGS__)
+
+/* Implement 'show debug infcall'.  */
+
+static void
+show_debug_infcall (struct ui_file *file, int from_tty,
+		   struct cmd_list_element *c, const char *value)
+{
+  gdb_printf (file, _("Inferior call debugging is %s.\n"), value);
+}
 
 /* If we can't find a function's name from its address,
    we print this instead.  */
@@ -62,9 +91,9 @@ show_may_call_functions_p (struct ui_file *file, int from_tty,
 			   struct cmd_list_element *c,
 			   const char *value)
 {
-  fprintf_filtered (file,
-		    _("Permission to call functions in the program is %s.\n"),
-		    value);
+  gdb_printf (file,
+	      _("Permission to call functions in the program is %s.\n"),
+	      value);
 }
 
 /* How you should pass arguments to a function depends on whether it
@@ -92,10 +121,10 @@ static void
 show_coerce_float_to_double_p (struct ui_file *file, int from_tty,
 			       struct cmd_list_element *c, const char *value)
 {
-  fprintf_filtered (file,
-		    _("Coercion of floats to doubles "
-		      "when calling functions is %s.\n"),
-		    value);
+  gdb_printf (file,
+	      _("Coercion of floats to doubles "
+		"when calling functions is %s.\n"),
+	      value);
 }
 
 /* This boolean tells what gdb should do if a signal is received while
@@ -110,10 +139,10 @@ static void
 show_unwind_on_signal_p (struct ui_file *file, int from_tty,
 			 struct cmd_list_element *c, const char *value)
 {
-  fprintf_filtered (file,
-		    _("Unwinding of stack if a signal is "
-		      "received while in a call dummy is %s.\n"),
-		    value);
+  gdb_printf (file,
+	      _("Unwinding of stack if a signal is "
+		"received while in a call dummy is %s.\n"),
+	      value);
 }
 
 /* This boolean tells what gdb should do if a std::terminate call is
@@ -136,10 +165,10 @@ show_unwind_on_terminating_exception_p (struct ui_file *file, int from_tty,
 					const char *value)
 
 {
-  fprintf_filtered (file,
-		    _("Unwind stack if a C++ exception is "
-		      "unhandled while in a call dummy is %s.\n"),
-		    value);
+  gdb_printf (file,
+	      _("Unwind stack if a C++ exception is "
+		"unhandled while in a call dummy is %s.\n"),
+	      value);
 }
 
 /* Perform the standard coercions that are specified
@@ -153,7 +182,7 @@ value_arg_coerce (struct gdbarch *gdbarch, struct value *arg,
 		  struct type *param_type, int is_prototyped)
 {
   const struct builtin_type *builtin = builtin_type (gdbarch);
-  struct type *arg_type = check_typedef (value_type (arg));
+  struct type *arg_type = check_typedef (arg->type ());
   struct type *type
     = param_type ? check_typedef (param_type) : arg_type;
 
@@ -183,7 +212,7 @@ value_arg_coerce (struct gdbarch *gdbarch, struct value *arg,
 	   convert it back to a reference.  This will issue an error
 	   if the value was not previously in memory - in some cases
 	   we should clearly be allowing this, but how?  */
-	new_value = value_cast (TYPE_TARGET_TYPE (type), arg);
+	new_value = value_cast (type->target_type (), arg);
 	new_value = value_ref (new_value, type->code ());
 	return new_value;
       }
@@ -194,21 +223,21 @@ value_arg_coerce (struct gdbarch *gdbarch, struct value *arg,
       /* If we don't have a prototype, coerce to integer type if necessary.  */
       if (!is_prototyped)
 	{
-	  if (TYPE_LENGTH (type) < TYPE_LENGTH (builtin->builtin_int))
+	  if (type->length () < builtin->builtin_int->length ())
 	    type = builtin->builtin_int;
 	}
       /* Currently all target ABIs require at least the width of an integer
 	 type for an argument.  We may have to conditionalize the following
 	 type coercion for future targets.  */
-      if (TYPE_LENGTH (type) < TYPE_LENGTH (builtin->builtin_int))
+      if (type->length () < builtin->builtin_int->length ())
 	type = builtin->builtin_int;
       break;
     case TYPE_CODE_FLT:
       if (!is_prototyped && coerce_float_to_double_p)
 	{
-	  if (TYPE_LENGTH (type) < TYPE_LENGTH (builtin->builtin_double))
+	  if (type->length () < builtin->builtin_double->length ())
 	    type = builtin->builtin_double;
-	  else if (TYPE_LENGTH (type) > TYPE_LENGTH (builtin->builtin_double))
+	  else if (type->length () > builtin->builtin_double->length ())
 	    type = builtin->builtin_long_double;
 	}
       break;
@@ -221,7 +250,7 @@ value_arg_coerce (struct gdbarch *gdbarch, struct value *arg,
 	 because they are passed by value.  */
       if (current_language->c_style_arrays_p ())
 	if (!type->is_vector ())
-	  type = lookup_pointer_type (TYPE_TARGET_TYPE (type));
+	  type = lookup_pointer_type (type->target_type ());
       break;
     case TYPE_CODE_UNDEF:
     case TYPE_CODE_PTR:
@@ -250,7 +279,7 @@ find_function_addr (struct value *function,
 		    struct type **retval_type,
 		    struct type **function_type)
 {
-  struct type *ftype = check_typedef (value_type (function));
+  struct type *ftype = check_typedef (function->type ());
   struct gdbarch *gdbarch = ftype->arch ();
   struct type *value_type = NULL;
   /* Initialize it just to avoid a GCC false warning.  */
@@ -262,11 +291,11 @@ find_function_addr (struct value *function,
   /* Determine address to call.  */
   if (ftype->code () == TYPE_CODE_FUNC
       || ftype->code () == TYPE_CODE_METHOD)
-    funaddr = value_address (function);
+    funaddr = function->address ();
   else if (ftype->code () == TYPE_CODE_PTR)
     {
       funaddr = value_as_address (function);
-      ftype = check_typedef (TYPE_TARGET_TYPE (ftype));
+      ftype = check_typedef (ftype->target_type ());
       if (ftype->code () == TYPE_CODE_FUNC
 	  || ftype->code () == TYPE_CODE_METHOD)
 	funaddr = gdbarch_convert_from_func_ptr_addr
@@ -295,19 +324,19 @@ find_function_addr (struct value *function,
 		target_ftype = find_gnu_ifunc_target_type (resolver_addr);
 	      if (target_ftype != NULL)
 		{
-		  value_type = TYPE_TARGET_TYPE (check_typedef (target_ftype));
+		  value_type = check_typedef (target_ftype)->target_type ();
 		  ftype = target_ftype;
 		}
 	    }
 	}
       else
-	value_type = TYPE_TARGET_TYPE (ftype);
+	value_type = ftype->target_type ();
     }
   else if (ftype->code () == TYPE_CODE_INT)
     {
       /* Handle the case of functions lacking debugging info.
 	 Their values are characters since their addresses are char.  */
-      if (TYPE_LENGTH (ftype) == 1)
+      if (ftype->length () == 1)
 	funaddr = value_as_address (value_addr (function));
       else
 	{
@@ -315,7 +344,7 @@ find_function_addr (struct value *function,
 	  int found_descriptor = 0;
 
 	  funaddr = 0;	/* pacify "gcc -Werror" */
-	  if (VALUE_LVAL (function) == lval_memory)
+	  if (function->lval () == lval_memory)
 	    {
 	      CORE_ADDR nfunaddr;
 
@@ -438,7 +467,7 @@ get_call_return_value (struct call_return_meta_info *ri)
   bool stack_temporaries = thread_stack_temporaries_enabled_p (thr);
 
   if (ri->value_type->code () == TYPE_CODE_VOID)
-    retval = allocate_value (ri->value_type);
+    retval = value::allocate (ri->value_type);
   else if (ri->struct_return_p)
     {
       if (stack_temporaries)
@@ -448,19 +477,13 @@ get_call_return_value (struct call_return_meta_info *ri)
 	  push_thread_stack_temporary (thr, retval);
 	}
       else
-	{
-	  retval = allocate_value (ri->value_type);
-	  read_value_memory (retval, 0, 1, ri->struct_addr,
-			     value_contents_raw (retval).data (),
-			     TYPE_LENGTH (ri->value_type));
-	}
+	retval = value_at_non_lval (ri->value_type, ri->struct_addr);
     }
   else
     {
-      retval = allocate_value (ri->value_type);
-      gdbarch_return_value (ri->gdbarch, ri->function, ri->value_type,
-			    get_current_regcache (),
-			    value_contents_raw (retval).data (), NULL);
+      gdbarch_return_value_as_value (ri->gdbarch, ri->function, ri->value_type,
+				     get_current_regcache (),
+				     &retval, NULL);
       if (stack_temporaries && class_or_union_p (ri->value_type))
 	{
 	  /* Values of class type returned in registers are copied onto
@@ -470,7 +493,7 @@ get_call_return_value (struct call_return_meta_info *ri)
 	     requiring GDB to evaluate the "this" pointer.  To evaluate
 	     the this pointer, GDB needs the memory address of the
 	     value.  */
-	  value_force_lval (retval, ri->struct_addr);
+	  retval->force_lval (ri->struct_addr);
 	  push_thread_stack_temporary (thr, retval);
 	}
     }
@@ -529,6 +552,8 @@ call_thread_fsm::call_thread_fsm (struct ui *waiting_ui,
 bool
 call_thread_fsm::should_stop (struct thread_info *thread)
 {
+  INFCALL_SCOPED_DEBUG_ENTER_EXIT;
+
   if (stop_stack_dummy == STOP_STACK_DUMMY)
     {
       /* Done.  */
@@ -538,11 +563,23 @@ call_thread_fsm::should_stop (struct thread_info *thread)
 	 registers are restored to what they were before the
 	 call..  */
       return_value = get_call_return_value (&return_meta_info);
+    }
 
-      /* Break out of wait_sync_command_done.  */
+  /* We are always going to stop this thread, but we might not be planning
+     to call call normal_stop, which is only done if should_notify_stop
+     returns true.
+
+     As normal_stop is responsible for calling async_enable_stdin, which
+     would break us out of wait_sync_command_done, then, if we don't plan
+     to call normal_stop, we should call async_enable_stdin here instead.
+
+     Unlike normal_stop, we only call async_enable_stdin on WAITING_UI, but
+     that is sufficient for wait_sync_command_done.  */
+  if (!this->should_notify_stop ())
+    {
       scoped_restore save_ui = make_scoped_restore (&current_ui, waiting_ui);
-      target_terminal::ours ();
-      waiting_ui->prompt_state = PROMPT_NEEDED;
+      gdb_assert (current_ui->prompt_state == PROMPT_BLOCKED);
+      async_enable_stdin ();
     }
 
   return true;
@@ -553,10 +590,28 @@ call_thread_fsm::should_stop (struct thread_info *thread)
 bool
 call_thread_fsm::should_notify_stop ()
 {
+  INFCALL_SCOPED_DEBUG_ENTER_EXIT;
+
   if (finished_p ())
     {
       /* Infcall succeeded.  Be silent and proceed with evaluating the
 	 expression.  */
+      infcall_debug_printf ("inferior call has finished, don't notify");
+      return false;
+    }
+
+  infcall_debug_printf ("inferior call didn't complete fully");
+
+  if (stopped_by_random_signal && unwind_on_signal_p)
+    {
+      infcall_debug_printf ("unwind-on-signal is on, don't notify");
+      return false;
+    }
+
+  if (stop_stack_dummy == STOP_STD_TERMINATE
+      && unwind_on_terminating_exception_p)
+    {
+      infcall_debug_printf ("unwind-on-terminating-exception is on, don't notify");
       return false;
     }
 
@@ -577,22 +632,21 @@ static struct gdb_exception
 run_inferior_call (std::unique_ptr<call_thread_fsm> sm,
 		   struct thread_info *call_thread, CORE_ADDR real_pc)
 {
+  INFCALL_SCOPED_DEBUG_ENTER_EXIT;
+
   struct gdb_exception caught_error;
-  int saved_in_infcall = call_thread->control.in_infcall;
   ptid_t call_thread_ptid = call_thread->ptid;
-  enum prompt_state saved_prompt_state = current_ui->prompt_state;
   int was_running = call_thread->state == THREAD_RUNNING;
-  int saved_ui_async = current_ui->async;
 
-  /* Infcalls run synchronously, in the foreground.  */
-  current_ui->prompt_state = PROMPT_BLOCKED;
-  /* So that we don't print the prompt prematurely in
-     fetch_inferior_event.  */
-  current_ui->async = 0;
+  infcall_debug_printf ("call function at %s in thread %s, was_running = %d",
+			core_addr_to_string (real_pc),
+			call_thread_ptid.to_string ().c_str (),
+			was_running);
 
-  delete_file_handler (current_ui->input_fd);
+  current_ui->unregister_file_handler ();
 
-  call_thread->control.in_infcall = 1;
+  scoped_restore restore_in_infcall
+    = make_scoped_restore (&call_thread->control.in_infcall, 1);
 
   clear_proceed_status (0);
 
@@ -607,27 +661,62 @@ run_inferior_call (std::unique_ptr<call_thread_fsm> sm,
 
   try
     {
+      /* Infcalls run synchronously, in the foreground.  */
+      scoped_restore restore_prompt_state
+	= make_scoped_restore (&current_ui->prompt_state, PROMPT_BLOCKED);
+
+      /* So that we don't print the prompt prematurely in
+	 fetch_inferior_event.  */
+      scoped_restore restore_ui_async
+	= make_scoped_restore (&current_ui->async, 0);
+
       proceed (real_pc, GDB_SIGNAL_0);
+
+      infrun_debug_show_threads ("non-exited threads after proceed for inferior-call",
+				 all_non_exited_threads ());
 
       /* Inferior function calls are always synchronous, even if the
 	 target supports asynchronous execution.  */
       wait_sync_command_done ();
+
+      infcall_debug_printf ("inferior call completed successfully");
     }
   catch (gdb_exception &e)
     {
+      infcall_debug_printf ("exception while making inferior call (%d): %s",
+			    e.reason, e.what ());
       caught_error = std::move (e);
     }
 
-  /* If GDB has the prompt blocked before, then ensure that it remains
-     so.  normal_stop calls async_enable_stdin, so reset the prompt
-     state again here.  In other cases, stdin will be re-enabled by
-     inferior_event_handler, when an exception is thrown.  */
-  current_ui->prompt_state = saved_prompt_state;
+  infcall_debug_printf ("thread is now: %s",
+			inferior_ptid.to_string ().c_str ());
+
+  /* After the inferior call finished, async_enable_stdin has been
+     called, either from normal_stop or from
+     call_thread_fsm::should_stop, and the prompt state has been
+     restored by the scoped_restore in the try block above.
+
+     If the inferior call finished successfully, then we should
+     disable stdin as we don't know yet whether the inferior will be
+     stopping.  Calling async_disable_stdin restores things to how
+     they were when this function was called.
+
+     If the inferior call didn't complete successfully, then
+     normal_stop has already been called, and we know for sure that we
+     are going to present this stop to the user.  In this case, we
+     call async_enable_stdin.  This changes the prompt state to
+     PROMPT_NEEDED.
+
+     If the previous prompt state was PROMPT_NEEDED, then as
+     async_enable_stdin has already been called, nothing additional
+     needs to be done here.  */
   if (current_ui->prompt_state == PROMPT_BLOCKED)
-    delete_file_handler (current_ui->input_fd);
-  else
-    ui_register_input_event_handler (current_ui);
-  current_ui->async = saved_ui_async;
+    {
+      if (call_thread->thread_fsm ()->finished_p ())
+	async_disable_stdin ();
+      else
+	async_enable_stdin ();
+    }
 
   /* If the infcall does NOT succeed, normal_stop will have already
      finished the thread states.  However, on success, normal_stop
@@ -663,8 +752,6 @@ run_inferior_call (std::unique_ptr<call_thread_fsm> sm,
 	breakpoint_auto_delete (call_thread->control.stop_bpstat);
     }
 
-  call_thread->control.in_infcall = saved_in_infcall;
-
   return caught_error;
 }
 
@@ -676,7 +763,7 @@ run_inferior_call (std::unique_ptr<call_thread_fsm> sm,
 static CORE_ADDR
 reserve_stack_space (const type *values_type, CORE_ADDR &sp)
 {
-  struct frame_info *frame = get_current_frame ();
+  frame_info_ptr frame = get_current_frame ();
   struct gdbarch *gdbarch = get_frame_arch (frame);
   CORE_ADDR addr = 0;
 
@@ -684,7 +771,7 @@ reserve_stack_space (const type *values_type, CORE_ADDR &sp)
     {
       /* Stack grows downward.  Align STRUCT_ADDR and SP after
 	 making space.  */
-      sp -= TYPE_LENGTH (values_type);
+      sp -= values_type->length ();
       if (gdbarch_frame_align_p (gdbarch))
 	sp = gdbarch_frame_align (gdbarch, sp);
       addr = sp;
@@ -696,7 +783,7 @@ reserve_stack_space (const type *values_type, CORE_ADDR &sp)
       if (gdbarch_frame_align_p (gdbarch))
 	sp = gdbarch_frame_align (gdbarch, sp);
       addr = sp;
-      sp += TYPE_LENGTH (values_type);
+      sp += values_type->length ();
       if (gdbarch_frame_align_p (gdbarch))
 	sp = gdbarch_frame_align (gdbarch, sp);
     }
@@ -767,6 +854,8 @@ call_function_by_hand_dummy (struct value *function,
 			     dummy_frame_dtor_ftype *dummy_dtor,
 			     void *dummy_dtor_data)
 {
+  INFCALL_SCOPED_DEBUG_ENTER_EXIT;
+
   CORE_ADDR sp;
   struct type *target_values_type;
   function_call_return_method return_method = return_method_normal;
@@ -774,7 +863,7 @@ call_function_by_hand_dummy (struct value *function,
   CORE_ADDR real_pc;
   CORE_ADDR bp_addr;
   struct frame_id dummy_id;
-  struct frame_info *frame;
+  frame_info_ptr frame;
   struct gdbarch *gdbarch;
   ptid_t call_thread_ptid;
   struct gdb_exception e;
@@ -817,7 +906,7 @@ call_function_by_hand_dummy (struct value *function,
 	     "target calling convention."),
 	   get_function_name (funaddr, name_buf, sizeof (name_buf)));
 
-  if (values_type == NULL)
+  if (values_type == NULL || values_type->is_stub ())
     values_type = default_return_type;
   if (values_type == NULL)
     {
@@ -832,6 +921,9 @@ call_function_by_hand_dummy (struct value *function,
 
   if (args.size () < ftype->num_fields ())
     error (_("Too few arguments in function call."));
+
+  infcall_debug_printf ("calling %s", get_function_name (funaddr, name_buf,
+							 sizeof (name_buf)));
 
   /* A holder for the inferior status.
      This is only needed while we're preparing the inferior function call.  */
@@ -919,7 +1011,7 @@ call_function_by_hand_dummy (struct value *function,
 	lastval = get_last_thread_stack_temporary (call_thread.get ());
 	if (lastval != NULL)
 	  {
-	    CORE_ADDR lastval_addr = value_address (lastval);
+	    CORE_ADDR lastval_addr = lastval->address ();
 
 	    if (gdbarch_inner_than (gdbarch, 1, 2))
 	      {
@@ -929,7 +1021,7 @@ call_function_by_hand_dummy (struct value *function,
 	    else
 	      {
 		gdb_assert (sp <= lastval_addr);
-		sp = lastval_addr + TYPE_LENGTH (value_type (lastval));
+		sp = lastval_addr + lastval->type ()->length ();
 	      }
 
 	    if (gdbarch_frame_align_p (gdbarch))
@@ -1012,7 +1104,7 @@ call_function_by_hand_dummy (struct value *function,
 	break;
       }
     default:
-      internal_error (__FILE__, __LINE__, _("bad switch"));
+      internal_error (_("bad switch"));
     }
 
   /* Coerce the arguments and handle pass-by-reference.
@@ -1030,7 +1122,7 @@ call_function_by_hand_dummy (struct value *function,
 	 prototyped.  Can we respect TYPE_VARARGS?  Probably not.  */
       if (ftype->code () == TYPE_CODE_METHOD)
 	prototyped = 1;
-      else if (TYPE_TARGET_TYPE (ftype) == NULL && ftype->num_fields () == 0
+      else if (ftype->target_type () == NULL && ftype->num_fields () == 0
 	       && default_return_type != NULL)
 	{
 	  /* Calling a no-debug function with the return type
@@ -1086,8 +1178,8 @@ call_function_by_hand_dummy (struct value *function,
 
       if (info.trivially_copy_constructible)
 	{
-	  int length = TYPE_LENGTH (param_type);
-	  write_memory (addr, value_contents (args[i]).data (), length);
+	  int length = param_type->length ();
+	  write_memory (addr, args[i]->contents ().data (), length);
 	}
       else
 	{
@@ -1168,7 +1260,7 @@ call_function_by_hand_dummy (struct value *function,
   if (return_method == return_method_hidden_param)
     {
       /* Add the new argument to the front of the argument list.  */
-      new_args.reserve (args.size ());
+      new_args.reserve (1 + args.size ());
       new_args.push_back
 	(value_from_pointer (lookup_pointer_type (values_type), struct_addr));
       new_args.insert (new_args.end (), args.begin (), args.end ());
@@ -1250,6 +1342,15 @@ call_function_by_hand_dummy (struct value *function,
   /* Register a clean-up for unwind_on_terminating_exception_breakpoint.  */
   SCOPE_EXIT { delete_std_terminate_breakpoint (); };
 
+  /* The stopped_by_random_signal variable is global.  If we are here
+     as part of a breakpoint condition check then the global will have
+     already been setup as part of the original breakpoint stop.  By
+     making the inferior call the global will be changed when GDB
+     handles the stop after the inferior call.  Avoid confusion by
+     restoring the current value after the inferior call.  */
+  scoped_restore restore_stopped_by_random_signal
+    = make_scoped_restore (&stopped_by_random_signal, 0);
+
   /* - SNIP - SNIP - SNIP - SNIP - SNIP - SNIP - SNIP - SNIP - SNIP -
      If you're looking to implement asynchronous dummy-frames, then
      just below is the place to chop this function in two..  */
@@ -1279,6 +1380,12 @@ call_function_by_hand_dummy (struct value *function,
       e = run_inferior_call (std::move (sm_up), call_thread.get (), real_pc);
     }
 
+    if (e.reason < 0)
+      infcall_debug_printf ("after inferior call, exception (%d): %s",
+			    e.reason, e.what ());
+    infcall_debug_printf ("after inferior call, thread state is: %s",
+			  thread_state_string (call_thread->state));
+
     gdb::observers::inferior_call_post.notify (call_thread_ptid, funaddr);
 
     if (call_thread->state != THREAD_EXITED)
@@ -1290,6 +1397,8 @@ call_function_by_hand_dummy (struct value *function,
 	  {
 	    struct value *retval;
 
+	    infcall_debug_printf ("call completed");
+
 	    /* The inferior call is successful.  Pop the dummy frame,
 	       which runs its destructors and restores the inferior's
 	       suspend state, and restore the inferior control
@@ -1300,7 +1409,7 @@ call_function_by_hand_dummy (struct value *function,
 	    /* Get the return value.  */
 	    retval = sm->return_value;
 
-	    /* Restore the original FSM and clean up / destroh the call FSM.
+	    /* Restore the original FSM and clean up / destroy the call FSM.
 	       Doing it in this order ensures that if the call to clean_up
 	       throws, the original FSM is properly restored.  */
 	    {
@@ -1320,6 +1429,8 @@ call_function_by_hand_dummy (struct value *function,
 
 	    return retval;
 	  }
+	else
+	  infcall_debug_printf ("call did not complete");
 
 	/* Didn't complete.  Clean up / destroy the call FSM, and restore the
 	   previous state machine, and handle the error.  */
@@ -1428,6 +1539,11 @@ When the function is done executing, GDB will silently stop."),
 	    {
 	      /* The user wants the context restored.  */
 
+	      /* Capture details of the signal so we can include them in
+		 the error message.  Calling dummy_frame_pop will restore
+		 the previous stop signal details.  */
+	      gdb_signal stop_signal = call_thread->stop_signal ();
+
 	      /* We must get back to the frame we were before the
 		 dummy call.  */
 	      dummy_frame_pop (dummy_id, call_thread.get ());
@@ -1439,11 +1555,13 @@ When the function is done executing, GDB will silently stop."),
 	      /* FIXME: Insert a bunch of wrap_here; name can be very
 		 long if it's a C++ name with arguments and stuff.  */
 	      error (_("\
-The program being debugged was signaled while in a function called from GDB.\n\
-GDB has restored the context to what it was before the call.\n\
-To change this behavior use \"set unwindonsignal off\".\n\
-Evaluation of the expression containing the function\n\
-(%s) will be abandoned."),
+The program being debugged received signal %s, %s\n\
+while in a function called from GDB.  GDB has restored the context\n\
+to what it was before the call.  To change this behavior use\n\
+\"set unwindonsignal off\".  Evaluation of the expression containing\n\
+the function (%s) will be abandoned."),
+		     gdb_signal_to_name (stop_signal),
+		     gdb_signal_to_string (stop_signal),
 		     name.c_str ());
 	    }
 	  else
@@ -1575,4 +1693,10 @@ The default is to unwind the frame."),
 			   show_unwind_on_terminating_exception_p,
 			   &setlist, &showlist);
 
+  add_setshow_boolean_cmd
+    ("infcall", class_maintenance, &debug_infcall,
+     _("Set inferior call debugging."),
+     _("Show inferior call debugging."),
+     _("When on, inferior function call specific debugging is enabled."),
+     NULL, show_debug_infcall, &setdebuglist, &showdebuglist);
 }

@@ -1,7 +1,7 @@
 /* Test file for mpfr_rint, mpfr_trunc, mpfr_floor, mpfr_ceil, mpfr_round,
    mpfr_rint_trunc, mpfr_rint_floor, mpfr_rint_ceil, mpfr_rint_round.
 
-Copyright 2002-2020 Free Software Foundation, Inc.
+Copyright 2002-2023 Free Software Foundation, Inc.
 Contributed by the AriC and Caramba projects, INRIA.
 
 This file is part of the GNU MPFR Library.
@@ -307,8 +307,23 @@ basic_tests (void)
 
 #if __MPFR_STDC (199901L)
 
+typedef int (*F2)(mpfr_ptr, mpfr_srcptr);
+
+/* The argument g below will be of type F2 with args (mpfr_ptr, mpfr_srcptr),
+   except for mpfr_rint, with args (mpfr_ptr, mpfr_srcptr, mpfr_rnd_t). So,
+   when passing mpfr_rint, we need a cast: "(F2) &mpfr_rint". The cast will
+   also be needed to compare the pointers: "g == (F2) &mpfr_rint", and that's
+   all. */
+
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#if __GNUC__ >= 8 || __clang_major__ >= 13
+#pragma GCC diagnostic ignored "-Wcast-function-type"
+#endif
+#endif
+
 static void
-test_fct (double (*f)(double), int (*g)(), const char *s, mpfr_rnd_t r)
+test_fct (double (*f)(double), F2 g, const char *s, mpfr_rnd_t r)
 {
   double d, y;
   mpfr_t dd, yy;
@@ -319,7 +334,7 @@ test_fct (double (*f)(double), int (*g)(), const char *s, mpfr_rnd_t r)
     {
       mpfr_set_d (dd, d, r);
       y = (*f)(d);
-      if (g == &mpfr_rint)
+      if (g == (F2) &mpfr_rint)
         mpfr_rint (yy, dd, r);
       else
         (*g)(yy, dd);
@@ -358,16 +373,20 @@ test_against_libc (void)
   TEST_FCT (ceil);
 #endif
 #if HAVE_NEARBYINT
-  for (r = 0; r < MPFR_RND_MAX ; r++)
+  RND_LOOP (r)
     if (mpfr_set_machine_rnd_mode ((mpfr_rnd_t) r) == 0)
-      test_fct (&nearbyint, &mpfr_rint, "rint", (mpfr_rnd_t) r);
+      test_fct (&nearbyint, (F2) &mpfr_rint, "rint", (mpfr_rnd_t) r);
 #endif
 }
+
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 
 #endif
 
 static void
-err (const char *str, mp_size_t s, mpfr_t x, mpfr_t y, mpfr_prec_t p,
+err (const char *str, mp_size_t s, mpfr_ptr x, mpfr_ptr y, mpfr_prec_t p,
      mpfr_rnd_t r, int trint, int inexact)
 {
   printf ("Error: %s\ns = %u, p = %u, r = %s, trint = %d, inexact = %d\nx = ",
@@ -500,7 +519,7 @@ main (int argc, char *argv[])
       if (s > 1)
         {
           mpz_mul_2exp (z, z, 1);
-          if (randlimb () % 2)
+          if (RAND_BOOL ())
             mpz_add_ui (z, z, 1);
         }
       /* now 2^(s-1) <= z < 2^s */
@@ -517,16 +536,16 @@ main (int argc, char *argv[])
 #endif
           exit (1);
         }
-      if (randlimb () % 2)
+      if (RAND_BOOL ())
         mpfr_neg (x, x, MPFR_RNDN);
-      if (randlimb () % 2)
+      if (RAND_BOOL ())
         mpfr_div_2ui (x, x, randlimb () % s, MPFR_RNDN);
       for (p = MPFR_PREC_MIN; p < 100; p++)
         {
           int trint;
           mpfr_set_prec (y, p);
           mpfr_set_prec (v, p);
-          for (r = 0; r < MPFR_RND_MAX ; r++)
+          RND_LOOP (r)
             for (trint = 0; trint < 4; trint++)
               {
                 if (trint == 2)

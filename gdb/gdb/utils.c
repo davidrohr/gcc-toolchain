@@ -1,6 +1,6 @@
 /* General utility routines for GDB, the GNU debugger.
 
-   Copyright (C) 1986-2022 Free Software Foundation, Inc.
+   Copyright (C) 1986-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -29,7 +29,8 @@
 #endif /* HAVE_SYS_RESOURCE_H */
 
 #ifdef TUI
-#include "tui/tui.h"		/* For tui_get_command_dimension.   */
+/* For tui_get_command_dimension and tui_disable.   */
+#include "tui/tui.h"
 #endif
 
 #ifdef __GO32__
@@ -51,10 +52,11 @@
 #include "gdbsupport/gdb_obstack.h"
 #include "gdbcore.h"
 #include "top.h"
+#include "ui.h"
 #include "main.h"
 #include "solist.h"
 
-#include "inferior.h"		/* for signed_pointer_to_address */
+#include "inferior.h"
 
 #include "gdb_curses.h"
 
@@ -77,18 +79,12 @@
 #include "gdbsupport/gdb-safe-ctype.h"
 #include "bt-utils.h"
 #include "gdbsupport/buildargv.h"
+#include "pager.h"
+#include "run-on-main-thread.h"
 
 void (*deprecated_error_begin_hook) (void);
 
 /* Prototypes for local functions */
-
-static void vfprintf_maybe_filtered (struct ui_file *, const char *,
-				     va_list, bool)
-  ATTRIBUTE_PRINTF (2, 0);
-
-static void fputs_maybe_filtered (const char *, struct ui_file *, int);
-
-static void prompt_for_continue (void);
 
 static void set_screen_size (void);
 static void set_width (void);
@@ -103,7 +99,7 @@ static std::chrono::steady_clock::duration prompt_for_continue_wait_time;
 
 /* A flag indicating whether to timestamp debugging messages.  */
 
-static bool debug_timestamp = false;
+bool debug_timestamp = false;
 
 /* True means that strings with character values >0x7F should be printed
    as octal escapes.  False means just print the value (e.g. it's an
@@ -114,9 +110,9 @@ static void
 show_sevenbit_strings (struct ui_file *file, int from_tty,
 		       struct cmd_list_element *c, const char *value)
 {
-  fprintf_filtered (file, _("Printing of 8-bit characters "
-			    "in strings as \\nnn is %s.\n"),
-		    value);
+  gdb_printf (file, _("Printing of 8-bit characters "
+		      "in strings as \\nnn is %s.\n"),
+	      value);
 }
 
 /* String to be printed before warning messages, if any.  */
@@ -128,7 +124,7 @@ static void
 show_pagination_enabled (struct ui_file *file, int from_tty,
 			 struct cmd_list_element *c, const char *value)
 {
-  fprintf_filtered (file, _("State of pagination is %s.\n"), value);
+  gdb_printf (file, _("State of pagination is %s.\n"), value);
 }
 
 
@@ -153,13 +149,10 @@ vwarning (const char *string, va_list args)
 	  term_state.emplace ();
 	  target_terminal::ours_for_output ();
 	}
-      if (filtered_printing_initialized ())
-	gdb_stdout->wrap_here (0);	/* Force out any buffered output.  */
-      gdb_flush (gdb_stdout);
       if (warning_pre_print)
-	fputs_unfiltered (warning_pre_print, gdb_stderr);
-      vfprintf_unfiltered (gdb_stderr, string, args);
-      fprintf_unfiltered (gdb_stderr, "\n");
+	gdb_puts (warning_pre_print, gdb_stderr);
+      gdb_vprintf (gdb_stderr, string, args);
+      gdb_printf (gdb_stderr, "\n");
     }
 }
 
@@ -173,12 +166,6 @@ verror (const char *string, va_list args)
   throw_verror (GENERIC_ERROR, string, args);
 }
 
-void
-error_stream (const string_file &stream)
-{
-  error (("%s"), stream.c_str ());
-}
-
 /* Emit a message and abort.  */
 
 static void ATTRIBUTE_NORETURN
@@ -187,7 +174,7 @@ abort_with_message (const char *msg)
   if (current_ui == NULL)
     fputs (msg, stderr);
   else
-    fputs_unfiltered (msg, gdb_stderr);
+    gdb_puts (msg, gdb_stderr);
 
   abort ();		/* ARI: abort */
 }
@@ -247,10 +234,10 @@ can_dump_core (enum resource_limit_kind limit_kind)
 void
 warn_cant_dump_core (const char *reason)
 {
-  fprintf_unfiltered (gdb_stderr,
-		      _("%s\nUnable to dump core, use `ulimit -c"
-			" unlimited' before executing GDB next time.\n"),
-		      reason);
+  gdb_printf (gdb_stderr,
+	      _("%s\nUnable to dump core, use `ulimit -c"
+		" unlimited' before executing GDB next time.\n"),
+	      reason);
 }
 
 /* Check whether GDB will be able to dump core using the dump_core
@@ -315,6 +302,16 @@ struct internal_problem
   bool should_print_backtrace;
 };
 
+/* Return true if the readline callbacks have been initialized for UI.
+   This is always true once GDB is fully initialized, but during the early
+   startup phase this is initially false.  */
+
+static bool
+readline_initialized (struct ui *ui)
+{
+  return ui->call_readline != nullptr;
+}
+
 /* Report a problem, internal to GDB, to the user.  Once the problem
    has been reported, and assuming GDB didn't quit, the caller can
    either allow execution to resume or throw an error.  */
@@ -353,6 +350,10 @@ internal_vproblem (struct internal_problem *problem,
       }
   }
 
+#ifdef TUI
+  tui_disable ();
+#endif
+
   /* Create a string containing the full error/warning message.  Need
      to call query with this full string, as otherwize the reason
      (error/warning) and question become separated.  Format using a
@@ -387,8 +388,9 @@ internal_vproblem (struct internal_problem *problem,
   if (problem->should_quit != internal_problem_ask
       || !confirm
       || !filtered_printing_initialized ()
+      || !readline_initialized (current_ui)
       || problem->should_print_backtrace)
-    fprintf_unfiltered (gdb_stderr, "%s\n", reason.c_str ());
+    gdb_printf (gdb_stderr, "%s\n", reason.c_str ());
 
   if (problem->should_print_backtrace)
     gdb_internal_backtrace ();
@@ -398,7 +400,8 @@ internal_vproblem (struct internal_problem *problem,
       /* Default (yes/batch case) is to quit GDB.  When in batch mode
 	 this lessens the likelihood of GDB going into an infinite
 	 loop.  */
-      if (!confirm || !filtered_printing_initialized ())
+      if (!confirm || !filtered_printing_initialized ()
+	  || !readline_initialized (current_ui))
 	quit_p = 1;
       else
 	quit_p = query (_("%s\nQuit this debugging session? "),
@@ -409,19 +412,21 @@ internal_vproblem (struct internal_problem *problem,
   else if (problem->should_quit == internal_problem_no)
     quit_p = 0;
   else
-    internal_error (__FILE__, __LINE__, _("bad switch"));
+    internal_error (_("bad switch"));
 
-  fputs_unfiltered (_("\nThis is a bug, please report it."), gdb_stderr);
+  gdb_puts (_("\nThis is a bug, please report it."), gdb_stderr);
   if (REPORT_BUGS_TO[0])
-    fprintf_unfiltered (gdb_stderr, _("  For instructions, see:\n%s."),
-			REPORT_BUGS_TO);
-  fputs_unfiltered ("\n\n", gdb_stderr);
+    gdb_printf (gdb_stderr, _("  For instructions, see:\n%ps."),
+		styled_string (file_name_style.style (),
+			       REPORT_BUGS_TO));
+  gdb_puts ("\n\n", gdb_stderr);
 
   if (problem->should_dump_core == internal_problem_ask)
     {
       if (!can_dump_core_warn (LIMIT_MAX, reason.c_str ()))
 	dump_core_p = 0;
-      else if (!filtered_printing_initialized ())
+      else if (!filtered_printing_initialized ()
+	       || !readline_initialized (current_ui))
 	dump_core_p = 1;
       else
 	{
@@ -437,7 +442,7 @@ internal_vproblem (struct internal_problem *problem,
   else if (problem->should_dump_core == internal_problem_no)
     dump_core_p = 0;
   else
-    internal_error (__FILE__, __LINE__, _("bad switch"));
+    internal_error (_("bad switch"));
 
   if (quit_p)
     {
@@ -604,42 +609,6 @@ add_internal_problem_command (struct internal_problem *problem)
     }
 }
 
-/* Return a newly allocated string, containing the PREFIX followed
-   by the system error message for errno (separated by a colon).  */
-
-static std::string
-perror_string (const char *prefix)
-{
-  const char *err = safe_strerror (errno);
-  return std::string (prefix) + ": " + err;
-}
-
-/* Print the system error message for errno, and also mention STRING
-   as the file name for which the error was encountered.  Use ERRCODE
-   for the thrown exception.  Then return to command level.  */
-
-void
-throw_perror_with_name (enum errors errcode, const char *string)
-{
-  std::string combined = perror_string (string);
-
-  /* I understand setting these is a matter of taste.  Still, some people
-     may clear errno but not know about bfd_error.  Doing this here is not
-     unreasonable.  */
-  bfd_set_error (bfd_error_no_error);
-  errno = 0;
-
-  throw_error (errcode, _("%s."), combined.c_str ());
-}
-
-/* See throw_perror_with_name, ERRCODE defaults here to GENERIC_ERROR.  */
-
-void
-perror_with_name (const char *string)
-{
-  throw_perror_with_name (GENERIC_ERROR, string);
-}
-
 /* Same as perror_with_name except that it prints a warning instead
    of throwing an error.  */
 
@@ -650,17 +619,13 @@ perror_warning_with_name (const char *string)
   warning (_("%s"), combined.c_str ());
 }
 
-/* Print the system error message for ERRCODE, and also mention STRING
-   as the file name for which the error was encountered.  */
+/* See utils.h.  */
 
 void
-print_sys_errmsg (const char *string, int errcode)
+warning_filename_and_errno (const char *filename, int saved_errno)
 {
-  const char *err = safe_strerror (errcode);
-  /* We want anything which was printed on stdout to come out first, before
-     this message.  */
-  gdb_flush (gdb_stdout);
-  fprintf_unfiltered (gdb_stderr, "%s: %s.\n", string, err);
+  warning (_("%ps: %s"), styled_string (file_name_style.style (), filename),
+	   safe_strerror (saved_errno));
 }
 
 /* Control C eventually causes this to be called, at a convenient time.  */
@@ -670,8 +635,8 @@ quit (void)
 {
   if (sync_quit_force_run)
     {
-      sync_quit_force_run = 0;
-      quit_force (NULL, 0);
+      sync_quit_force_run = false;
+      throw_forced_quit ("SIGTERM");
     }
 
 #ifdef __MSDOS__
@@ -694,6 +659,9 @@ quit (void)
 void
 maybe_quit (void)
 {
+  if (!is_main_thread ())
+    return;
+
   if (sync_quit_force_run)
     quit ();
 
@@ -709,13 +677,12 @@ malloc_failure (long size)
 {
   if (size > 0)
     {
-      internal_error (__FILE__, __LINE__,
-		      _("virtual memory exhausted: can't allocate %ld bytes."),
+      internal_error (_("virtual memory exhausted: can't allocate %ld bytes."),
 		      size);
     }
   else
     {
-      internal_error (__FILE__, __LINE__, _("virtual memory exhausted."));
+      internal_error (_("virtual memory exhausted."));
     }
 }
 
@@ -750,36 +717,6 @@ myread (int desc, char *addr, int len)
   return orglen;
 }
 
-/* See utils.h.  */
-
-ULONGEST
-uinteger_pow (ULONGEST v1, LONGEST v2)
-{
-  if (v2 < 0)
-    {
-      if (v1 == 0)
-	error (_("Attempt to raise 0 to negative power."));
-      else
-	return 0;
-    }
-  else
-    {
-      /* The Russian Peasant's Algorithm.  */
-      ULONGEST v;
-
-      v = 1;
-      for (;;)
-	{
-	  if (v2 & 1L)
-	    v *= v1;
-	  v2 >>= 1;
-	  if (v2 == 0)
-	    return v;
-	  v1 *= v1;
-	}
-    }
-}
-
 
 
 /* An RAII class that sets up to handle input and then tears down
@@ -794,7 +731,7 @@ public:
       m_ui (NULL)
   {
     target_terminal::ours ();
-    ui_register_input_event_handler (current_ui);
+    current_ui->register_file_handler ();
     if (current_ui->prompt_state == PROMPT_BLOCKED)
       m_ui = current_ui;
   }
@@ -802,7 +739,7 @@ public:
   ~scoped_input_handler ()
   {
     if (m_ui != NULL)
-      ui_unregister_input_event_handler (m_ui);
+      m_ui->unregister_file_handler ();
   }
 
   DISABLE_COPY_AND_ASSIGN (scoped_input_handler);
@@ -875,18 +812,18 @@ defaulted_query (const char *ctlstr, const char defchar, va_list args)
      way, important error messages don't get lost when talking to GDB
      over a pipe.  */
   if (current_ui->instream != current_ui->stdin_stream
-      || !input_interactive_p (current_ui)
+      || !current_ui->input_interactive_p ()
       /* Restrict queries to the main UI.  */
       || current_ui != main_ui)
     {
       target_terminal::scoped_restore_terminal_state term_state;
       target_terminal::ours_for_output ();
       gdb_stdout->wrap_here (0);
-      vfprintf_filtered (gdb_stdout, ctlstr, args);
+      gdb_vprintf (gdb_stdout, ctlstr, args);
 
-      printf_filtered (_("(%s or %s) [answered %c; "
-			 "input not from terminal]\n"),
-		       y_string, n_string, def_answer);
+      gdb_printf (_("(%s or %s) [answered %c; "
+		    "input not from terminal]\n"),
+		  y_string, n_string, def_answer);
 
       return def_value;
     }
@@ -921,7 +858,7 @@ defaulted_query (const char *ctlstr, const char defchar, va_list args)
 
       if (response == NULL)	/* C-d  */
 	{
-	  printf_filtered ("EOF [assumed %c]\n", def_answer);
+	  gdb_printf ("EOF [assumed %c]\n", def_answer);
 	  retval = def_value;
 	  break;
 	}
@@ -948,15 +885,15 @@ defaulted_query (const char *ctlstr, const char defchar, va_list args)
 	  break;
 	}
       /* Invalid entries are not defaulted and require another selection.  */
-      printf_filtered (_("Please answer %s or %s.\n"),
-		       y_string, n_string);
+      gdb_printf (_("Please answer %s or %s.\n"),
+		  y_string, n_string);
     }
 
   /* Add time spend in this routine to prompt_for_continue_wait_time.  */
   prompt_for_continue_wait_time += steady_clock::now () - prompt_started;
 
   if (annotation_level > 1)
-    printf_filtered (("\n\032\032post-query\n"));
+    gdb_printf (("\n\032\032post-query\n"));
   return retval;
 }
 
@@ -1137,9 +1074,9 @@ static void
 show_lines_per_page (struct ui_file *file, int from_tty,
 		     struct cmd_list_element *c, const char *value)
 {
-  fprintf_filtered (file,
-		    _("Number of lines gdb thinks are in a page is %s.\n"),
-		    value);
+  gdb_printf (file,
+	      _("Number of lines gdb thinks are in a page is %s.\n"),
+	      value);
 }
 
 /* Number of chars per line or UINT_MAX if line folding is disabled.  */
@@ -1148,10 +1085,10 @@ static void
 show_chars_per_line (struct ui_file *file, int from_tty,
 		     struct cmd_list_element *c, const char *value)
 {
-  fprintf_filtered (file,
-		    _("Number of characters gdb thinks "
-		      "are in a line is %s.\n"),
-		    value);
+  gdb_printf (file,
+	      _("Number of characters gdb thinks "
+		"are in a line is %s.\n"),
+	      value);
 }
 
 /* Current count of lines printed on this page, chars on this line.  */
@@ -1163,7 +1100,7 @@ static bool pagination_disabled_for_command;
 
 /* Buffer and start column of buffered text, for doing smarter word-
    wrapping.  When someone calls wrap_here(), we start buffering output
-   that comes through fputs_filtered().  If we see a newline, we just
+   that comes through gdb_puts().  If we see a newline, we just
    spit it out and forget about the wrap_here().  If we see another
    wrap_here(), we spit it out and remember the newer one.  If we see
    the end of the line, we spit out a newline, the indent, and then
@@ -1171,20 +1108,15 @@ static bool pagination_disabled_for_command;
 
 static bool filter_initialized = false;
 
-/* Contains characters which are waiting to be output (they have
-   already been counted in chars_printed).  */
-static std::string wrap_buffer;
-
-/* String to indent by if the wrap occurs.  */
-static int wrap_indent;
-
-/* Column number on the screen where wrap_buffer begins, or 0 if wrapping
-   is not in effect.  */
-static int wrap_column;
-
-/* The style applied at the time that wrap_here was called.  */
-static ui_file_style wrap_style;
 
+
+/* See readline's rlprivate.h.  */
+
+EXTERN_C int _rl_term_autowrap;
+
+/* See utils.h.  */
+
+int readline_hidden_cols = 0;
 
 /* Initialize the number of lines per page and chars per line.  */
 
@@ -1214,8 +1146,21 @@ init_page_info (void)
 
       /* Get the screen size from Readline.  */
       rl_get_screen_size (&rows, &cols);
+
+      /* Readline:
+	 - ignores the COLUMNS variable when detecting screen width
+	   (because rl_prefer_env_winsize defaults to 0)
+	 - puts the detected screen width in the COLUMNS variable
+	   (because rl_change_environment defaults to 1)
+	 - may report one less than the detected screen width in
+	   rl_get_screen_size (when _rl_term_autowrap == 0).
+	 We could set readline_hidden_cols by comparing COLUMNS to cols as
+	 returned by rl_get_screen_size, but instead simply use
+	 _rl_term_autowrap.  */
+      readline_hidden_cols = _rl_term_autowrap ? 0 : 1;
+
       lines_per_page = rows;
-      chars_per_line = cols;
+      chars_per_line = cols + readline_hidden_cols;
 
       /* Readline should have fetched the termcap entry for us.
 	 Only try to use tgetnum function if rl_get_screen_size
@@ -1270,6 +1215,15 @@ set_batch_flag_and_restore_page_info::~set_batch_flag_and_restore_page_info ()
   set_width ();
 }
 
+/* An approximation of SQRT(INT_MAX) that is:
+   - cheap to calculate,
+   - guaranteed to be smaller than SQRT(INT_MAX), such that
+     sqrt_int_max * sqrt_int_max doesn't overflow, and
+   - "close enough" to SQRT(INT_MAX), for instance for INT_MAX == 2147483647,
+     SQRT(INT_MAX) is ~46341 and sqrt_int_max == 32767.  */
+
+static const int sqrt_int_max = INT_MAX >> (sizeof (int) * 8 / 2);
+
 /* Set the screen size based on LINES_PER_PAGE and CHARS_PER_LINE.  */
 
 static void
@@ -1288,8 +1242,6 @@ set_screen_size (void)
      Cap "infinity" to approximately sqrt(INT_MAX) so that we don't
      overflow in rl_set_screen_size, which multiplies rows and columns
      to compute the number of characters on the screen.  */
-
-  const int sqrt_int_max = INT_MAX >> (sizeof (int) * 8 / 2);
 
   if (rows <= 0 || rows > sqrt_int_max)
     {
@@ -1315,7 +1267,6 @@ set_width (void)
   if (chars_per_line == 0)
     init_page_info ();
 
-  wrap_buffer.clear ();
   filter_initialized = true;
 }
 
@@ -1344,55 +1295,88 @@ set_screen_width_and_height (int width, int height)
   set_width ();
 }
 
-/* The currently applied style.  */
-
-static ui_file_style applied_style;
-
-/* Emit an ANSI style escape for STYLE.  If STREAM is nullptr, emit to
-   the wrap buffer; otherwise emit to STREAM.  */
+/* Implement "maint info screen".  */
 
 static void
-emit_style_escape (const ui_file_style &style,
-		   struct ui_file *stream = nullptr)
+maintenance_info_screen (const char *args, int from_tty)
 {
-  if (applied_style != style)
-    {
-      applied_style = style;
+  int rows, cols;
+  rl_get_screen_size (&rows, &cols);
 
-      if (stream == nullptr)
-	wrap_buffer.append (style.to_ansi ());
+  gdb_printf (gdb_stdout,
+	      _("Number of characters gdb thinks "
+		"are in a line is %u%s.\n"),
+	      chars_per_line,
+	      chars_per_line == UINT_MAX ? " (unlimited)" : "");
+
+  gdb_printf (gdb_stdout,
+	      _("Number of characters readline reports "
+		"are in a line is %d%s.\n"),
+	      cols,
+	      (cols == sqrt_int_max
+	       ? " (unlimited)"
+	       : (cols == sqrt_int_max - 1
+		  ? " (unlimited - 1)"
+		  : "")));
+
+#ifdef HAVE_LIBCURSES
+  gdb_printf (gdb_stdout,
+	     _("Number of characters curses thinks "
+	       "are in a line is %d.\n"),
+	     COLS);
+#endif
+
+  gdb_printf (gdb_stdout,
+	      _("Number of characters environment thinks "
+		"are in a line is %s (COLUMNS).\n"),
+	      getenv ("COLUMNS"));
+
+  gdb_printf (gdb_stdout,
+	      _("Number of lines gdb thinks are in a page is %u%s.\n"),
+	      lines_per_page,
+	      lines_per_page == UINT_MAX ? " (unlimited)" : "");
+
+  gdb_printf (gdb_stdout,
+	      _("Number of lines readline reports "
+		"are in a page is %d%s.\n"),
+	      rows,
+	      rows == sqrt_int_max ? " (unlimited)" : "");
+
+#ifdef HAVE_LIBCURSES
+  gdb_printf (gdb_stdout,
+	     _("Number of lines curses thinks "
+	       "are in a page is %d.\n"),
+	      LINES);
+#endif
+
+  gdb_printf (gdb_stdout,
+	      _("Number of lines environment thinks "
+		"are in a page is %s (LINES).\n"),
+	      getenv ("LINES"));
+}
+
+void
+pager_file::emit_style_escape (const ui_file_style &style)
+{
+  if (can_emit_style_escape () && style != m_applied_style)
+    {
+      m_applied_style = style;
+      if (m_paging)
+	m_stream->emit_style_escape (style);
       else
-	stream->puts (style.to_ansi ().c_str ());
+	m_wrap_buffer.append (style.to_ansi ());
     }
 }
 
-/* Set the current output style.  This will affect future uses of the
-   _filtered output functions.  */
-
-static void
-set_output_style (struct ui_file *stream, const ui_file_style &style)
-{
-  if (!stream->can_emit_style_escape ())
-    return;
-
-  /* Note that we may not pass STREAM here, when we want to emit to
-     the wrap buffer, not directly to STREAM.  */
-  if (stream == gdb_stdout)
-    stream = nullptr;
-  emit_style_escape (style, stream);
-}
-
-/* See utils.h.  */
+/* See pager.h.  */
 
 void
-reset_terminal_style (struct ui_file *stream)
+pager_file::reset_style ()
 {
-  if (stream->can_emit_style_escape ())
+  if (can_emit_style_escape ())
     {
-      /* Force the setting, regardless of what we think the setting
-	 might already be.  */
-      applied_style = ui_file_style ();
-      wrap_buffer.append (applied_style.to_ansi ());
+      m_applied_style = ui_file_style ();
+      m_wrap_buffer.append (m_applied_style.to_ansi ());
     }
 }
 
@@ -1401,8 +1385,8 @@ reset_terminal_style (struct ui_file *stream)
    telling users what to do in the prompt is more user-friendly than
    expecting them to think of Ctrl-C/SIGINT.  */
 
-static void
-prompt_for_continue (void)
+void
+pager_file::prompt_for_continue ()
 {
   char cont_prompt[120];
   /* Used to add duration we waited for user to respond to
@@ -1411,12 +1395,13 @@ prompt_for_continue (void)
   steady_clock::time_point prompt_started = steady_clock::now ();
   bool disable_pagination = pagination_disabled_for_command;
 
+  scoped_restore save_paging = make_scoped_restore (&m_paging, true);
+
   /* Clear the current styling.  */
-  if (gdb_stdout->can_emit_style_escape ())
-    emit_style_escape (ui_file_style (), gdb_stdout);
+  m_stream->emit_style_escape (ui_file_style ());
 
   if (annotation_level > 1)
-    printf_unfiltered (("\n\032\032pre-prompt-for-continue\n"));
+    m_stream->puts (("\n\032\032pre-prompt-for-continue\n"));
 
   strcpy (cont_prompt,
 	  "--Type <RET> for more, q to quit, "
@@ -1439,7 +1424,7 @@ prompt_for_continue (void)
   prompt_for_continue_wait_time += steady_clock::now () - prompt_started;
 
   if (annotation_level > 1)
-    printf_unfiltered (("\n\032\032post-prompt-for-continue\n"));
+    m_stream->puts (("\n\032\032post-prompt-for-continue\n"));
 
   if (ignore != NULL)
     {
@@ -1490,16 +1475,21 @@ reinitialize_more_filter (void)
   pagination_disabled_for_command = false;
 }
 
-/* Flush the wrap buffer to STREAM, if necessary.  */
-
-static void
-flush_wrap_buffer (struct ui_file *stream)
+void
+pager_file::flush_wrap_buffer ()
 {
-  if (stream == gdb_stdout && !wrap_buffer.empty ())
+  if (!m_paging && !m_wrap_buffer.empty ())
     {
-      stream->puts (wrap_buffer.c_str ());
-      wrap_buffer.clear ();
+      m_stream->puts (m_wrap_buffer.c_str ());
+      m_wrap_buffer.clear ();
     }
+}
+
+void
+pager_file::flush ()
+{
+  flush_wrap_buffer ();
+  m_stream->flush ();
 }
 
 /* See utils.h.  */
@@ -1507,7 +1497,6 @@ flush_wrap_buffer (struct ui_file *stream)
 void
 gdb_flush (struct ui_file *stream)
 {
-  flush_wrap_buffer (stream);
   stream->flush ();
 }
 
@@ -1522,40 +1511,39 @@ get_chars_per_line ()
 /* See ui-file.h.  */
 
 void
-ui_file::wrap_here (int indent)
+pager_file::wrap_here (int indent)
 {
   /* This should have been allocated, but be paranoid anyway.  */
   gdb_assert (filter_initialized);
 
-  flush_wrap_buffer (this);
+  flush_wrap_buffer ();
   if (chars_per_line == UINT_MAX)	/* No line overflow checking.  */
     {
-      wrap_column = 0;
+      m_wrap_column = 0;
     }
   else if (chars_printed >= chars_per_line)
     {
-      puts_filtered ("\n");
+      this->puts ("\n");
       if (indent != 0)
-	puts_filtered (n_spaces (indent));
-      wrap_column = 0;
+	this->puts (n_spaces (indent));
+      m_wrap_column = 0;
     }
   else
     {
-      wrap_column = chars_printed;
-      wrap_indent = indent;
-      wrap_style = applied_style;
+      m_wrap_column = chars_printed;
+      m_wrap_indent = indent;
+      m_wrap_style = m_applied_style;
     }
 }
 
-/* Print input string to gdb_stdout, filtered, with wrap, 
-   arranging strings in columns of n chars.  String can be
-   right or left justified in the column.  Never prints 
-   trailing spaces.  String should never be longer than
-   width.  FIXME: this could be useful for the EXAMINE 
-   command, which currently doesn't tabulate very well.  */
+/* Print input string to gdb_stdout arranging strings in columns of n
+   chars.  String can be right or left justified in the column.  Never
+   prints trailing spaces.  String should never be longer than width.
+   FIXME: this could be useful for the EXAMINE command, which
+   currently doesn't tabulate very well.  */
 
 void
-puts_filtered_tabular (char *string, int width, int right)
+puts_tabular (char *string, int width, int right)
 {
   int spaces = 0;
   int stringlen;
@@ -1564,13 +1552,13 @@ puts_filtered_tabular (char *string, int width, int right)
   gdb_assert (chars_per_line > 0);
   if (chars_per_line == UINT_MAX)
     {
-      puts_filtered (string);
-      puts_filtered ("\n");
+      gdb_puts (string);
+      gdb_puts ("\n");
       return;
     }
 
   if (((chars_printed - 1) / width + 2) * width >= chars_per_line)
-    puts_filtered ("\n");
+    gdb_puts ("\n");
 
   if (width >= chars_per_line)
     width = chars_per_line - 1;
@@ -1587,8 +1575,8 @@ puts_filtered_tabular (char *string, int width, int right)
   while (spaces--)
     spacebuf[spaces] = ' ';
 
-  puts_filtered (spacebuf);
-  puts_filtered (string);
+  gdb_puts (spacebuf);
+  gdb_puts (string);
 }
 
 
@@ -1602,55 +1590,42 @@ begin_line (void)
 {
   if (chars_printed > 0)
     {
-      puts_filtered ("\n");
+      gdb_puts ("\n");
     }
 }
 
-
-/* Like fputs but if FILTER is true, pause after every screenful.
-
-   Regardless of FILTER can wrap at points other than the final
-   character of a line.
-
-   Unlike fputs, fputs_maybe_filtered does not return a value.
-   It is OK for LINEBUFFER to be NULL, in which case just don't print
-   anything.
-
-   Note that a longjmp to top level may occur in this routine (only if
-   FILTER is true) (since prompt_for_continue may do so) so this
-   routine should not be called when cleanups are not in place.  */
-
-static void
-fputs_maybe_filtered (const char *linebuffer, struct ui_file *stream,
-		      int filter)
+void
+pager_file::puts (const char *linebuffer)
 {
   const char *lineptr;
 
   if (linebuffer == 0)
     return;
 
-  /* Don't do any filtering if it is disabled.  */
-  if (!stream->can_page ()
-      || stream != gdb_stdout
-      || !pagination_enabled
-      || pagination_disabled_for_command
-      || batch_flag
+  /* Don't do any filtering or wrapping if both are disabled.  */
+  if (batch_flag
       || (lines_per_page == UINT_MAX && chars_per_line == UINT_MAX)
       || top_level_interpreter () == NULL
       || top_level_interpreter ()->interp_ui_out ()->is_mi_like_p ())
     {
-      flush_wrap_buffer (stream);
-      stream->puts (linebuffer);
+      flush_wrap_buffer ();
+      m_stream->puts (linebuffer);
       return;
     }
 
   auto buffer_clearer
     = make_scope_exit ([&] ()
 		       {
-			 wrap_buffer.clear ();
-			 wrap_column = 0;
-			 wrap_indent = 0;
+			 m_wrap_buffer.clear ();
+			 m_wrap_column = 0;
+			 m_wrap_indent = 0;
 		       });
+
+  /* If the user does "set height 1" then the pager will exhibit weird
+     behavior.  This is pathological, though, so don't allow it.  */
+  const unsigned int lines_allowed = (lines_per_page > 1
+				      ? lines_per_page - 1
+				      : 1);
 
   /* Go through and output each character.  Show line extension
      when this is necessary; prompt user for new page when this is
@@ -1662,8 +1637,9 @@ fputs_maybe_filtered (const char *linebuffer, struct ui_file *stream,
       /* Possible new page.  Note that PAGINATION_DISABLED_FOR_COMMAND
 	 might be set during this loop, so we must continue to check
 	 it here.  */
-      if (filter && (lines_printed >= lines_per_page - 1)
-	  && !pagination_disabled_for_command)
+      if (pagination_enabled
+	  && !pagination_disabled_for_command
+	  && lines_printed >= lines_allowed)
 	prompt_for_continue ();
 
       while (*lineptr && *lineptr != '\n')
@@ -1673,7 +1649,7 @@ fputs_maybe_filtered (const char *linebuffer, struct ui_file *stream,
 	  /* Print a single line.  */
 	  if (*lineptr == '\t')
 	    {
-	      wrap_buffer.push_back ('\t');
+	      m_wrap_buffer.push_back ('\t');
 	      /* Shifting right by 3 produces the number of tab stops
 		 we have already passed, and then adding one and
 		 shifting left 3 advances to the next tab stop.  */
@@ -1683,20 +1659,20 @@ fputs_maybe_filtered (const char *linebuffer, struct ui_file *stream,
 	  else if (*lineptr == '\033'
 		   && skip_ansi_escape (lineptr, &skip_bytes))
 	    {
-	      wrap_buffer.append (lineptr, skip_bytes);
+	      m_wrap_buffer.append (lineptr, skip_bytes);
 	      /* Note that we don't consider this a character, so we
 		 don't increment chars_printed here.  */
 	      lineptr += skip_bytes;
 	    }
 	  else if (*lineptr == '\r')
 	    {
-	      wrap_buffer.push_back (*lineptr);
+	      m_wrap_buffer.push_back (*lineptr);
 	      chars_printed = 0;
 	      lineptr++;
 	    }
 	  else
 	    {
-	      wrap_buffer.push_back (*lineptr);
+	      m_wrap_buffer.push_back (*lineptr);
 	      chars_printed++;
 	      lineptr++;
 	    }
@@ -1711,12 +1687,12 @@ fputs_maybe_filtered (const char *linebuffer, struct ui_file *stream,
 		 prompt is given; and to avoid emitting style
 		 sequences in the middle of a run of text, we track
 		 this as well.  */
-	      ui_file_style save_style = applied_style;
+	      ui_file_style save_style = m_applied_style;
 	      bool did_paginate = false;
 
 	      chars_printed = 0;
 	      lines_printed++;
-	      if (wrap_column)
+	      if (m_wrap_column)
 		{
 		  /* We are about to insert a newline at an historic
 		     location in the WRAP_BUFFER.  Before we do we want to
@@ -1724,73 +1700,60 @@ fputs_maybe_filtered (const char *linebuffer, struct ui_file *stream,
 		     need to insert an escape sequence we must restore the
 		     current applied style to how it was at the WRAP_COLUMN
 		     location.  */
-		  applied_style = wrap_style;
-		  if (stream->can_emit_style_escape ())
-		    emit_style_escape (ui_file_style (), stream);
+		  m_applied_style = m_wrap_style;
+		  m_stream->emit_style_escape (ui_file_style ());
 		  /* If we aren't actually wrapping, don't output
 		     newline -- if chars_per_line is right, we
 		     probably just overflowed anyway; if it's wrong,
 		     let us keep going.  */
-		  /* XXX: The ideal thing would be to call
-		     'stream->putc' here, but we can't because it
-		     currently calls 'fputc_unfiltered', which ends up
-		     calling us, which generates an infinite
-		     recursion.  */
-		  stream->puts ("\n");
+		  m_stream->puts ("\n");
 		}
 	      else
-		flush_wrap_buffer (stream);
+		this->flush_wrap_buffer ();
 
 	      /* Possible new page.  Note that
 		 PAGINATION_DISABLED_FOR_COMMAND might be set during
 		 this loop, so we must continue to check it here.  */
-	      if (filter
-		  && lines_printed >= lines_per_page - 1
-		  && !pagination_disabled_for_command)
+	      if (pagination_enabled
+		  && !pagination_disabled_for_command
+		  && lines_printed >= lines_allowed)
 		{
 		  prompt_for_continue ();
 		  did_paginate = true;
 		}
 
 	      /* Now output indentation and wrapped string.  */
-	      if (wrap_column)
+	      if (m_wrap_column)
 		{
-		  stream->puts (n_spaces (wrap_indent));
+		  m_stream->puts (n_spaces (m_wrap_indent));
 
 		  /* Having finished inserting the wrapping we should
 		     restore the style as it was at the WRAP_COLUMN.  */
-		  if (stream->can_emit_style_escape ())
-		    emit_style_escape (wrap_style, stream);
+		  m_stream->emit_style_escape (m_wrap_style);
 
 		  /* The WRAP_BUFFER will still contain content, and that
 		     content might set some alternative style.  Restore
 		     APPLIED_STYLE as it was before we started wrapping,
 		     this reflects the current style for the last character
 		     in WRAP_BUFFER.  */
-		  applied_style = save_style;
+		  m_applied_style = save_style;
 
 		  /* Note that this can set chars_printed > chars_per_line
 		     if we are printing a long string.  */
-		  chars_printed = wrap_indent + (save_chars - wrap_column);
-		  wrap_column = 0;	/* And disable fancy wrap */
+		  chars_printed = m_wrap_indent + (save_chars - m_wrap_column);
+		  m_wrap_column = 0;	/* And disable fancy wrap */
 		}
-	      else if (did_paginate && stream->can_emit_style_escape ())
-		emit_style_escape (save_style, stream);
+	      else if (did_paginate)
+		m_stream->emit_style_escape (save_style);
 	    }
 	}
 
       if (*lineptr == '\n')
 	{
 	  chars_printed = 0;
-	  stream->wrap_here (0); /* Spit out chars, cancel
-				    further wraps.  */
+	  wrap_here (0); /* Spit out chars, cancel further wraps.  */
 	  lines_printed++;
-	  /* XXX: The ideal thing would be to call
-	     'stream->putc' here, but we can't because it
-	     currently calls 'fputc_unfiltered', which ends up
-	     calling us, which generates an infinite
-	     recursion.  */
-	  stream->puts ("\n");
+	  m_stream->puts ("\n");
 	  lineptr++;
 	}
     }
@@ -1799,15 +1762,53 @@ fputs_maybe_filtered (const char *linebuffer, struct ui_file *stream,
 }
 
 void
-fputs_filtered (const char *linebuffer, struct ui_file *stream)
+pager_file::write (const char *buf, long length_buf)
 {
-  fputs_maybe_filtered (linebuffer, stream, 1);
+  /* We have to make a string here because the pager uses
+     skip_ansi_escape, which requires NUL-termination.  */
+  std::string str (buf, length_buf);
+  this->puts (str.c_str ());
 }
 
-void
-fputs_unfiltered (const char *linebuffer, struct ui_file *stream)
+#if GDB_SELF_TEST
+
+/* Test that disabling the pager does not also disable word
+   wrapping.  */
+
+static void
+test_pager ()
 {
-  fputs_maybe_filtered (linebuffer, stream, 0);
+  string_file *strfile = new string_file ();
+  pager_file pager (strfile);
+
+  /* Make sure the pager is disabled.  */
+  scoped_restore save_enabled
+    = make_scoped_restore (&pagination_enabled, false);
+  scoped_restore save_disabled
+    = make_scoped_restore (&pagination_disabled_for_command, false);
+  scoped_restore save_batch
+    = make_scoped_restore (&batch_flag, false);
+  scoped_restore save_lines
+    = make_scoped_restore (&lines_per_page, 50);
+  /* Make it easy to word wrap.  */
+  scoped_restore save_chars
+    = make_scoped_restore (&chars_per_line, 15);
+  scoped_restore save_printed
+    = make_scoped_restore (&chars_printed, 0);
+
+  pager.puts ("aaaaaaaaaaaa");
+  pager.wrap_here (2);
+  pager.puts ("bbbbbbbbbbbb\n");
+
+  SELF_CHECK (strfile->string () == "aaaaaaaaaaaa\n  bbbbbbbbbbbb\n");
+}
+
+#endif /* GDB_SELF_TEST */
+
+void
+gdb_puts (const char *linebuffer, struct ui_file *stream)
+{
+  stream->puts (linebuffer);
 }
 
 /* See utils.h.  */
@@ -1816,20 +1817,9 @@ void
 fputs_styled (const char *linebuffer, const ui_file_style &style,
 	      struct ui_file *stream)
 {
-  set_output_style (stream, style);
-  fputs_maybe_filtered (linebuffer, stream, 1);
-  set_output_style (stream, ui_file_style ());
-}
-
-/* See utils.h.  */
-
-void
-fputs_styled_unfiltered (const char *linebuffer, const ui_file_style &style,
-			 struct ui_file *stream)
-{
-  set_output_style (stream, style);
-  fputs_maybe_filtered (linebuffer, stream, 0);
-  set_output_style (stream, ui_file_style ());
+  stream->emit_style_escape (style);
+  gdb_puts (linebuffer, stream);
+  stream->emit_style_escape (ui_file_style ());
 }
 
 /* See utils.h.  */
@@ -1847,157 +1837,58 @@ fputs_highlighted (const char *str, const compiled_regex &highlight,
       /* Output the part before pmatch with current style.  */
       while (pmatch.rm_so > 0)
 	{
-	  fputc_filtered (*str, stream);
+	  gdb_putc (*str, stream);
 	  pmatch.rm_so--;
 	  str++;
 	}
 
       /* Output pmatch with the highlight style.  */
-      set_output_style (stream, highlight_style.style ());
+      stream->emit_style_escape (highlight_style.style ());
       while (n_highlight > 0)
 	{
-	  fputc_filtered (*str, stream);
+	  gdb_putc (*str, stream);
 	  n_highlight--;
 	  str++;
 	}
-      set_output_style (stream, ui_file_style ());
+      stream->emit_style_escape (ui_file_style ());
     }
 
   /* Output the trailing part of STR not matching HIGHLIGHT.  */
   if (*str)
-    fputs_filtered (str, stream);
-}
-
-int
-putchar_unfiltered (int c)
-{
-  return fputc_unfiltered (c, gdb_stdout);
-}
-
-/* Write character C to gdb_stdout using GDB's paging mechanism and return C.
-   May return nonlocally.  */
-
-int
-putchar_filtered (int c)
-{
-  return fputc_filtered (c, gdb_stdout);
-}
-
-int
-fputc_unfiltered (int c, struct ui_file *stream)
-{
-  char buf[2];
-
-  buf[0] = c;
-  buf[1] = 0;
-  fputs_unfiltered (buf, stream);
-  return c;
-}
-
-int
-fputc_filtered (int c, struct ui_file *stream)
-{
-  char buf[2];
-
-  buf[0] = c;
-  buf[1] = 0;
-  fputs_filtered (buf, stream);
-  return c;
-}
-
-/* Print a variable number of ARGS using format FORMAT.  If this
-   information is going to put the amount written (since the last call
-   to REINITIALIZE_MORE_FILTER or the last page break) over the page size,
-   call prompt_for_continue to get the users permission to continue.
-
-   Unlike fprintf, this function does not return a value.
-
-   We implement three variants, vfprintf (takes a vararg list and stream),
-   fprintf (takes a stream to write on), and printf (the usual).
-
-   Note also that this may throw a quit (since prompt_for_continue may
-   do so).  */
-
-static void
-vfprintf_maybe_filtered (struct ui_file *stream, const char *format,
-			 va_list args, bool filter)
-{
-  ui_out_flags flags = disallow_ui_out_field;
-  if (!filter)
-    flags |= unfiltered_output;
-  cli_ui_out (stream, flags).vmessage (applied_style, format, args);
-}
-
-
-void
-vfprintf_filtered (struct ui_file *stream, const char *format, va_list args)
-{
-  vfprintf_maybe_filtered (stream, format, args, true);
+    gdb_puts (str, stream);
 }
 
 void
-vfprintf_unfiltered (struct ui_file *stream, const char *format, va_list args)
+gdb_putc (int c)
 {
-  if (debug_timestamp && stream == gdb_stdlog)
-    {
-      static bool needs_timestamp = true;
-
-      /* Print timestamp if previous print ended with a \n.  */
-      if (needs_timestamp)
-	{
-	  using namespace std::chrono;
-
-	  steady_clock::time_point now = steady_clock::now ();
-	  seconds s = duration_cast<seconds> (now.time_since_epoch ());
-	  microseconds us = duration_cast<microseconds> (now.time_since_epoch () - s);
-	  std::string timestamp = string_printf ("%ld.%06ld ",
-						 (long) s.count (),
-						 (long) us.count ());
-	  fputs_unfiltered (timestamp.c_str (), stream);
-	}
-
-      /* Print the message.  */
-      string_file sfile;
-      cli_ui_out (&sfile, 0).vmessage (ui_file_style (), format, args);
-      const std::string &linebuffer = sfile.string ();
-      fputs_unfiltered (linebuffer.c_str (), stream);
-
-      size_t len = linebuffer.length ();
-      needs_timestamp = (len > 0 && linebuffer[len - 1] == '\n');
-    }
-  else
-    vfprintf_maybe_filtered (stream, format, args, false);
+  return gdb_stdout->putc (c);
 }
 
 void
-vprintf_filtered (const char *format, va_list args)
+gdb_putc (int c, struct ui_file *stream)
 {
-  vfprintf_filtered (gdb_stdout, format, args);
+  return stream->putc (c);
 }
 
 void
-vprintf_unfiltered (const char *format, va_list args)
+gdb_vprintf (struct ui_file *stream, const char *format, va_list args)
 {
-  vfprintf_unfiltered (gdb_stdout, format, args);
+  stream->vprintf (format, args);
 }
 
 void
-fprintf_filtered (struct ui_file *stream, const char *format, ...)
+gdb_vprintf (const char *format, va_list args)
+{
+  gdb_stdout->vprintf (format, args);
+}
+
+void
+gdb_printf (struct ui_file *stream, const char *format, ...)
 {
   va_list args;
 
   va_start (args, format);
-  vfprintf_filtered (stream, format, args);
-  va_end (args);
-}
-
-void
-fprintf_unfiltered (struct ui_file *stream, const char *format, ...)
-{
-  va_list args;
-
-  va_start (args, format);
-  vfprintf_unfiltered (stream, format, args);
+  gdb_vprintf (stream, format, args);
   va_end (args);
 }
 
@@ -2009,46 +1900,20 @@ fprintf_styled (struct ui_file *stream, const ui_file_style &style,
 {
   va_list args;
 
-  set_output_style (stream, style);
+  stream->emit_style_escape (style);
   va_start (args, format);
-  vfprintf_filtered (stream, format, args);
+  gdb_vprintf (stream, format, args);
   va_end (args);
-  set_output_style (stream, ui_file_style ());
-}
-
-/* See utils.h.  */
-
-void
-vfprintf_styled (struct ui_file *stream, const ui_file_style &style,
-		 const char *format, va_list args)
-{
-  set_output_style (stream, style);
-  vfprintf_filtered (stream, format, args);
-  set_output_style (stream, ui_file_style ());
-}
-
-/* See utils.h.  */
-
-void
-vfprintf_styled_no_gdbfmt (struct ui_file *stream, const ui_file_style &style,
-			   bool filter, const char *format, va_list args)
-{
-  std::string str = string_vprintf (format, args);
-  if (!str.empty ())
-    {
-      set_output_style (stream, style);
-      fputs_maybe_filtered (str.c_str (), stream, filter);
-      set_output_style (stream, ui_file_style ());
-    }
+  stream->emit_style_escape (ui_file_style ());
 }
 
 void
-printf_filtered (const char *format, ...)
+gdb_printf (const char *format, ...)
 {
   va_list args;
 
   va_start (args, format);
-  vfprintf_filtered (gdb_stdout, format, args);
+  gdb_vprintf (gdb_stdout, format, args);
   va_end (args);
 }
 
@@ -2059,7 +1924,9 @@ printf_unfiltered (const char *format, ...)
   va_list args;
 
   va_start (args, format);
-  vfprintf_unfiltered (gdb_stdout, format, args);
+  string_file file (gdb_stdout->can_emit_style_escape ());
+  file.vprintf (format, args);
+  gdb_stdout->puts_unfiltered (file.string ().c_str ());
   va_end (args);
 }
 
@@ -2069,15 +1936,9 @@ printf_unfiltered (const char *format, ...)
    This one doesn't, and had better not!  */
 
 void
-puts_filtered (const char *string)
+gdb_puts (const char *string)
 {
-  fputs_filtered (string, gdb_stdout);
-}
-
-void
-puts_unfiltered (const char *string)
-{
-  fputs_unfiltered (string, gdb_stdout);
+  gdb_stdout->puts (string);
 }
 
 /* Return a pointer to N spaces and a null.  The pointer is good
@@ -2104,34 +1965,34 @@ n_spaces (int n)
 
 /* Print N spaces.  */
 void
-print_spaces_filtered (int n, struct ui_file *stream)
+print_spaces (int n, struct ui_file *stream)
 {
-  fputs_filtered (n_spaces (n), stream);
+  gdb_puts (n_spaces (n), stream);
 }
 
 /* C++/ObjC demangler stuff.  */
 
-/* fprintf_symbol_filtered attempts to demangle NAME, a symbol in language
+/* fprintf_symbol attempts to demangle NAME, a symbol in language
    LANG, using demangling args ARG_MODE, and print it filtered to STREAM.
    If the name is not mangled, or the language for the name is unknown, or
    demangling is off, the name is printed in its "raw" form.  */
 
 void
-fprintf_symbol_filtered (struct ui_file *stream, const char *name,
-			 enum language lang, int arg_mode)
+fprintf_symbol (struct ui_file *stream, const char *name,
+		enum language lang, int arg_mode)
 {
   if (name != NULL)
     {
       /* If user wants to see raw output, no problem.  */
       if (!demangle)
 	{
-	  fputs_filtered (name, stream);
+	  gdb_puts (name, stream);
 	}
       else
 	{
 	  gdb::unique_xmalloc_ptr<char> demangled
-	    = language_demangle (language_def (lang), name, arg_mode);
-	  fputs_filtered (demangled ? demangled.get () : name, stream);
+	    = language_def (lang)->demangle_symbol (name, arg_mode);
+	  gdb_puts (demangled ? demangled.get () : name, stream);
 	}
     }
 }
@@ -2298,6 +2159,8 @@ strncmp_iw_with_mode (const char *string1, const char *string2,
   bool have_colon_op = (language == language_cplus
 			|| language == language_rust
 			|| language == language_fortran);
+
+  gdb_assert (match_for_lcd == nullptr || match_for_lcd->empty ());
 
   while (1)
     {
@@ -2557,7 +2420,31 @@ strncmp_iw_with_mode (const char *string1, const char *string2,
 	  return 0;
 	}
       else
-	return (*string1 != '\0' && *string1 != '(');
+	{
+	  if (*string1 == '(')
+	    {
+	      int p_count = 0;
+
+	      do
+		{
+		  if (*string1 == '(')
+		    ++p_count;
+		  else if (*string1 == ')')
+		    --p_count;
+		  ++string1;
+		}
+	      while (*string1 != '\0' && p_count > 0);
+
+	      /* There maybe things like 'const' after the parameters,
+		 which we do want to ignore.  However, if there's an '@'
+		 then this likely indicates something like '@plt' which we
+		 should not ignore.  */
+	      return *string1 == '@';
+	    }
+
+	  return *string1 == '\0' ? 0 : 1;
+	}
+
     }
   else
     return 1;
@@ -3089,6 +2976,11 @@ strncmp_iw_with_mode_tests ()
   CHECK_MATCH ("foo[abi:a][abi:b](bar[abi:c][abi:d])", "foo[abi:a][abi:b](bar[abi:c][abi:d])",
 	       MATCH_PARAMS);
   CHECK_MATCH ("foo[abi:a][abi:b](bar[abi:c][abi:d])", "foo", MATCH_PARAMS);
+  CHECK_NO_MATCH ("foo(args)@plt", "foo", MATCH_PARAMS);
+  CHECK_NO_MATCH ("foo((())args(()))@plt", "foo", MATCH_PARAMS);
+  CHECK_MATCH ("foo((())args(()))", "foo", MATCH_PARAMS);
+  CHECK_MATCH ("foo(args) const", "foo", MATCH_PARAMS);
+  CHECK_MATCH ("foo(args)const", "foo", MATCH_PARAMS);
 
   /* strncmp_iw_with_mode also supports case insensitivity.  */
   {
@@ -3259,66 +3151,16 @@ strcmp_iw_ordered (const char *string1, const char *string2)
     }
 }
 
-/* See utils.h.  */
-
-bool
-streq (const char *lhs, const char *rhs)
-{
-  return !strcmp (lhs, rhs);
-}
-
 
-
-/*
-   ** subset_compare()
-   **    Answer whether string_to_compare is a full or partial match to
-   **    template_string.  The partial match must be in sequence starting
-   **    at index 0.
- */
-int
-subset_compare (const char *string_to_compare, const char *template_string)
-{
-  int match;
-
-  if (template_string != NULL && string_to_compare != NULL
-      && strlen (string_to_compare) <= strlen (template_string))
-    match =
-      (startswith (template_string, string_to_compare));
-  else
-    match = 0;
-  return match;
-}
 
 static void
 show_debug_timestamp (struct ui_file *file, int from_tty,
 		      struct cmd_list_element *c, const char *value)
 {
-  fprintf_filtered (file, _("Timestamping debugging messages is %s.\n"),
-		    value);
+  gdb_printf (file, _("Timestamping debugging messages is %s.\n"),
+	      value);
 }
 
-
-/* See utils.h.  */
-
-CORE_ADDR
-address_significant (gdbarch *gdbarch, CORE_ADDR addr)
-{
-  /* Clear insignificant bits of a target address and sign extend resulting
-     address, avoiding shifts larger or equal than the width of a CORE_ADDR.
-     The local variable ADDR_BIT stops the compiler reporting a shift overflow
-     when it won't occur.  Skip updating of target address if current target
-     has not set gdbarch significant_addr_bit.  */
-  int addr_bit = gdbarch_significant_addr_bit (gdbarch);
-
-  if (addr_bit && (addr_bit < (sizeof (CORE_ADDR) * HOST_CHAR_BIT)))
-    {
-      CORE_ADDR sign = (CORE_ADDR) 1 << (addr_bit - 1);
-      addr &= ((CORE_ADDR) 1 << addr_bit) - 1;
-      addr = (addr ^ sign) - sign;
-    }
-
-  return addr;
-}
 
 const char *
 paddress (struct gdbarch *gdbarch, CORE_ADDR addr)
@@ -3833,6 +3675,43 @@ copy_bitwise (gdb_byte *dest, ULONGEST dest_offset,
     }
 }
 
+#if GDB_SELF_TEST
+static void
+test_assign_set_return_if_changed ()
+{
+  bool changed;
+  int a;
+
+  for (bool initial : { false, true })
+    {
+      changed = initial;
+      a = 1;
+      assign_set_if_changed (a, 1, changed);
+      SELF_CHECK (a == 1);
+      SELF_CHECK (changed == initial);
+    }
+
+  for (bool initial : { false, true })
+    {
+      changed = initial;
+      a = 1;
+      assign_set_if_changed (a, 2, changed);
+      SELF_CHECK (a == 2);
+      SELF_CHECK (changed == true);
+    }
+
+  a = 1;
+  changed = assign_return_if_changed (a, 1);
+  SELF_CHECK (a == 1);
+  SELF_CHECK (changed == false);
+
+  a = 1;
+  assign_set_if_changed (a, 2, changed);
+  SELF_CHECK (a == 2);
+  SELF_CHECK (changed == true);
+}
+#endif
+
 void _initialize_utils ();
 void
 _initialize_utils ()
@@ -3888,10 +3767,16 @@ When set, debugging messages will be marked with seconds and microseconds."),
   add_internal_problem_command (&internal_warning_problem);
   add_internal_problem_command (&demangler_warning_problem);
 
+  add_cmd ("screen", class_maintenance, &maintenance_info_screen,
+	 _("Show screen characteristics."), &maintenanceinfolist);
+
 #if GDB_SELF_TEST
   selftests::register_test ("gdb_realpath", gdb_realpath_tests);
   selftests::register_test ("gdb_argv_array_view", gdb_argv_as_array_view_test);
   selftests::register_test ("strncmp_iw_with_mode",
 			    strncmp_iw_with_mode_tests);
+  selftests::register_test ("pager", test_pager);
+  selftests::register_test ("assign_set_return_if_changed",
+			    test_assign_set_return_if_changed);
 #endif
 }

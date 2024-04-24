@@ -1,5 +1,5 @@
 /* BFD back-end for ALPHA Extended-Coff files.
-   Copyright (C) 1993-2022 Free Software Foundation, Inc.
+   Copyright (C) 1993-2023 Free Software Foundation, Inc.
    Modified from coff-mips.c by Steve Chamberlain <sac@cygnus.com> and
    Ian Lance Taylor <ian@cygnus.com>.
 
@@ -116,7 +116,7 @@ static reloc_howto_type alpha_howto_table[] =
      of the gp register are loaded.  */
   HOWTO (ALPHA_R_IGNORE,	/* type */
 	 0,			/* rightshift */
-	 0,			/* size (0 = byte, 1 = short, 2 = long) */
+	 1,			/* size */
 	 8,			/* bitsize */
 	 true,			/* pc_relative */
 	 0,			/* bitpos */
@@ -131,7 +131,7 @@ static reloc_howto_type alpha_howto_table[] =
   /* A 32 bit reference to a symbol.  */
   HOWTO (ALPHA_R_REFLONG,	/* type */
 	 0,			/* rightshift */
-	 2,			/* size (0 = byte, 1 = short, 2 = long) */
+	 4,			/* size */
 	 32,			/* bitsize */
 	 false,			/* pc_relative */
 	 0,			/* bitpos */
@@ -146,7 +146,7 @@ static reloc_howto_type alpha_howto_table[] =
   /* A 64 bit reference to a symbol.  */
   HOWTO (ALPHA_R_REFQUAD,	/* type */
 	 0,			/* rightshift */
-	 4,			/* size (0 = byte, 1 = short, 2 = long) */
+	 8,			/* size */
 	 64,			/* bitsize */
 	 false,			/* pc_relative */
 	 0,			/* bitpos */
@@ -163,7 +163,7 @@ static reloc_howto_type alpha_howto_table[] =
      added in.  */
   HOWTO (ALPHA_R_GPREL32,	/* type */
 	 0,			/* rightshift */
-	 2,			/* size (0 = byte, 1 = short, 2 = long) */
+	 4,			/* size */
 	 32,			/* bitsize */
 	 false,			/* pc_relative */
 	 0,			/* bitpos */
@@ -180,7 +180,7 @@ static reloc_howto_type alpha_howto_table[] =
      reloc always seems to be against the .lita section.  */
   HOWTO (ALPHA_R_LITERAL,	/* type */
 	 0,			/* rightshift */
-	 2,			/* size (0 = byte, 1 = short, 2 = long) */
+	 4,			/* size */
 	 16,			/* bitsize */
 	 false,			/* pc_relative */
 	 0,			/* bitpos */
@@ -203,7 +203,7 @@ static reloc_howto_type alpha_howto_table[] =
      relocation.  */
   HOWTO (ALPHA_R_LITUSE,	/* type */
 	 0,			/* rightshift */
-	 2,			/* size (0 = byte, 1 = short, 2 = long) */
+	 4,			/* size */
 	 32,			/* bitsize */
 	 false,			/* pc_relative */
 	 0,			/* bitpos */
@@ -228,7 +228,7 @@ static reloc_howto_type alpha_howto_table[] =
      address.  */
   HOWTO (ALPHA_R_GPDISP,	/* type */
 	 16,			/* rightshift */
-	 2,			/* size (0 = byte, 1 = short, 2 = long) */
+	 4,			/* size */
 	 16,			/* bitsize */
 	 true,			/* pc_relative */
 	 0,			/* bitpos */
@@ -245,7 +245,7 @@ static reloc_howto_type alpha_howto_table[] =
      relative offset in the instruction.  */
   HOWTO (ALPHA_R_BRADDR,	/* type */
 	 2,			/* rightshift */
-	 2,			/* size (0 = byte, 1 = short, 2 = long) */
+	 4,			/* size */
 	 21,			/* bitsize */
 	 true,			/* pc_relative */
 	 0,			/* bitpos */
@@ -260,7 +260,7 @@ static reloc_howto_type alpha_howto_table[] =
   /* A hint for a jump to a register.  */
   HOWTO (ALPHA_R_HINT,		/* type */
 	 2,			/* rightshift */
-	 2,			/* size (0 = byte, 1 = short, 2 = long) */
+	 4,			/* size */
 	 14,			/* bitsize */
 	 true,			/* pc_relative */
 	 0,			/* bitpos */
@@ -275,7 +275,7 @@ static reloc_howto_type alpha_howto_table[] =
   /* 16 bit PC relative offset.  */
   HOWTO (ALPHA_R_SREL16,	/* type */
 	 0,			/* rightshift */
-	 1,			/* size (0 = byte, 1 = short, 2 = long) */
+	 2,			/* size */
 	 16,			/* bitsize */
 	 true,			/* pc_relative */
 	 0,			/* bitpos */
@@ -290,7 +290,7 @@ static reloc_howto_type alpha_howto_table[] =
   /* 32 bit PC relative offset.  */
   HOWTO (ALPHA_R_SREL32,	/* type */
 	 0,			/* rightshift */
-	 2,			/* size (0 = byte, 1 = short, 2 = long) */
+	 4,			/* size */
 	 32,			/* bitsize */
 	 true,			/* pc_relative */
 	 0,			/* bitpos */
@@ -305,7 +305,7 @@ static reloc_howto_type alpha_howto_table[] =
   /* A 64 bit PC relative offset.  */
   HOWTO (ALPHA_R_SREL64,	/* type */
 	 0,			/* rightshift */
-	 4,			/* size (0 = byte, 1 = short, 2 = long) */
+	 8,			/* size */
 	 64,			/* bitsize */
 	 true,			/* pc_relative */
 	 0,			/* bitpos */
@@ -320,7 +320,7 @@ static reloc_howto_type alpha_howto_table[] =
   /* Push a value on the reloc evaluation stack.  */
   HOWTO (ALPHA_R_OP_PUSH,	/* type */
 	 0,			/* rightshift */
-	 0,			/* size (0 = byte, 1 = short, 2 = long) */
+	 0,			/* size */
 	 0,			/* bitsize */
 	 false,			/* pc_relative */
 	 0,			/* bitpos */
@@ -336,7 +336,7 @@ static reloc_howto_type alpha_howto_table[] =
      a bitfield of size r_size starting at bit position r_offset.  */
   HOWTO (ALPHA_R_OP_STORE,	/* type */
 	 0,			/* rightshift */
-	 4,			/* size (0 = byte, 1 = short, 2 = long) */
+	 8,			/* size */
 	 64,			/* bitsize */
 	 false,			/* pc_relative */
 	 0,			/* bitpos */
@@ -352,7 +352,7 @@ static reloc_howto_type alpha_howto_table[] =
      relocation stack.  */
   HOWTO (ALPHA_R_OP_PSUB,	/* type */
 	 0,			/* rightshift */
-	 0,			/* size (0 = byte, 1 = short, 2 = long) */
+	 0,			/* size */
 	 0,			/* bitsize */
 	 false,			/* pc_relative */
 	 0,			/* bitpos */
@@ -368,7 +368,7 @@ static reloc_howto_type alpha_howto_table[] =
      given value.  */
   HOWTO (ALPHA_R_OP_PRSHIFT,	/* type */
 	 0,			/* rightshift */
-	 0,			/* size (0 = byte, 1 = short, 2 = long) */
+	 0,			/* size */
 	 0,			/* bitsize */
 	 false,			/* pc_relative */
 	 0,			/* bitpos */
@@ -383,7 +383,7 @@ static reloc_howto_type alpha_howto_table[] =
   /* Adjust the GP value for a new range in the object file.  */
   HOWTO (ALPHA_R_GPVALUE,	/* type */
 	 0,			/* rightshift */
-	 0,			/* size (0 = byte, 1 = short, 2 = long) */
+	 0,			/* size */
 	 0,			/* bitsize */
 	 false,			/* pc_relative */
 	 0,			/* bitpos */
@@ -745,6 +745,7 @@ alpha_ecoff_get_relocated_section_contents (bfd *abfd,
   if (reloc_size < 0)
     return NULL;
 
+  bfd_byte *orig_data = data;
   if (!bfd_get_full_section_contents (input_bfd, input_section, &data))
     return NULL;
 
@@ -756,7 +757,7 @@ alpha_ecoff_get_relocated_section_contents (bfd *abfd,
 
   reloc_vector = (arelent **) bfd_malloc (reloc_size);
   if (reloc_vector == NULL)
-    return NULL;
+    goto error_return;
 
   reloc_count = bfd_canonicalize_reloc (input_bfd, input_section,
 					reloc_vector, symbols);
@@ -1138,6 +1139,8 @@ alpha_ecoff_get_relocated_section_contents (bfd *abfd,
 
  error_return:
   free (reloc_vector);
+  if (orig_data == NULL)
+    free (data);
   return NULL;
 }
 
@@ -2027,9 +2030,9 @@ alpha_ecoff_read_ar_hdr (bfd *abfd)
 
       /* This is a compressed file.  We must set the size correctly.
 	 The size is the eight bytes after the dummy file header.  */
-      if (bfd_seek (abfd, (file_ptr) FILHSZ, SEEK_CUR) != 0
-	  || bfd_bread (ab, (bfd_size_type) 8, abfd) != 8
-	  || bfd_seek (abfd, (file_ptr) (- (FILHSZ + 8)), SEEK_CUR) != 0)
+      if (bfd_seek (abfd, FILHSZ, SEEK_CUR) != 0
+	  || bfd_read (ab, 8, abfd) != 8
+	  || bfd_seek (abfd, -(FILHSZ + 8), SEEK_CUR) != 0)
 	{
 	  free (ret);
 	  return NULL;
@@ -2074,18 +2077,18 @@ alpha_ecoff_get_elt_at_filepos (bfd *archive, file_ptr filepos,
     return nbfd;
 
   /* We must uncompress this element.  We do this by copying it into a
-     memory buffer, and making bfd_bread and bfd_seek use that buffer.
+     memory buffer, and making bfd_read and bfd_seek use that buffer.
      This can use a lot of memory, but it's simpler than getting a
      temporary file, making that work with the file descriptor caching
      code, and making sure that it is deleted at all appropriate
      times.  It can be changed if it ever becomes important.  */
 
   /* The compressed file starts with a dummy ECOFF file header.  */
-  if (bfd_seek (nbfd, (file_ptr) FILHSZ, SEEK_SET) != 0)
+  if (bfd_seek (nbfd, FILHSZ, SEEK_SET) != 0)
     goto error_return;
 
   /* The next eight bytes are the real file size.  */
-  if (bfd_bread (ab, (bfd_size_type) 8, nbfd) != 8)
+  if (bfd_read (ab, 8, nbfd) != 8)
     goto error_return;
   size = H_GET_64 (nbfd, ab);
 
@@ -2112,7 +2115,7 @@ alpha_ecoff_get_elt_at_filepos (bfd *archive, file_ptr filepos,
       left = size;
 
       /* I don't know what the next eight bytes are for.  */
-      if (bfd_bread (ab, (bfd_size_type) 8, nbfd) != 8)
+      if (bfd_read (ab, 8, nbfd) != 8)
 	goto error_return;
 
       /* This is the uncompression algorithm.  It's a simple
@@ -2123,7 +2126,7 @@ alpha_ecoff_get_elt_at_filepos (bfd *archive, file_ptr filepos,
 	 next eight bytes in the output stream.  */
       memset (dict, 0, sizeof dict);
       h = 0;
-      while (bfd_bread (&b, (bfd_size_type) 1, nbfd) == 1)
+      while (bfd_read (&b, 1, nbfd) == 1)
 	{
 	  unsigned int i;
 
@@ -2135,7 +2138,7 @@ alpha_ecoff_get_elt_at_filepos (bfd *archive, file_ptr filepos,
 		n = dict[h];
 	      else
 		{
-		  if (bfd_bread (&n, 1, nbfd) != 1)
+		  if (bfd_read (&n, 1, nbfd) != 1)
 		    goto error_return;
 		  dict[h] = n;
 		}
@@ -2171,6 +2174,7 @@ alpha_ecoff_get_elt_at_filepos (bfd *archive, file_ptr filepos,
   nbfd->iostream = bim;
   nbfd->iovec = &_bfd_memory_iovec;
   nbfd->origin = 0;
+  nbfd->size = 0;
   BFD_ASSERT (! nbfd->cacheable);
 
   return nbfd;

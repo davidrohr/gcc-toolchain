@@ -2,7 +2,7 @@
 # Wrapper around gcc to tweak the output in various ways when running
 # the testsuite.
 
-# Copyright (C) 2010-2022 Free Software Foundation, Inc.
+# Copyright (C) 2010-2023 Free Software Foundation, Inc.
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation; either version 3 of the License, or
@@ -73,6 +73,11 @@ READELF=${READELF:-readelf}
 
 DWZ=${DWZ:-dwz}
 DWP=${DWP:-dwp}
+
+# shellcheck disable=SC2206 # Allow word splitting.
+STRIP_ARGS_STRIP_DEBUG=(${STRIP_ARGS_STRIP_DEBUG:---strip-debug})
+# shellcheck disable=SC2206 # Allow word splitting.
+STRIP_ARGS_KEEP_DEBUG=(${STRIP_ARGS_KEEP_DEBUG:---only-keep-debug})
 
 have_link=unknown
 next_is_output_file=no
@@ -204,6 +209,24 @@ if [ "$want_index" = true ]; then
     [ $rc != 0 ] && exit $rc
 fi
 
+if [ "$want_dwz" = true ] || [ "$want_multi" = true ]; then
+    # Require dwz version with PR dwz/24468 fixed.
+    dwz_version_major_required=0
+    dwz_version_minor_required=13
+    dwz_version_line=$($DWZ --version 2>&1 | head -n 1)
+    dwz_version=${dwz_version_line//dwz version /}
+    dwz_version_major=${dwz_version//\.*/}
+    dwz_version_minor=${dwz_version//*\./}
+    if [ "$dwz_version_major" -lt "$dwz_version_major_required" ] \
+	   || { [ "$dwz_version_major" -eq "$dwz_version_major_required" ] \
+		    && [ "$dwz_version_minor" -lt "$dwz_version_minor_required" ]; }; then
+	detected="$dwz_version_major.$dwz_version_minor"
+	required="$dwz_version_major_required.$dwz_version_minor_required"
+	echo "$myname: dwz version $detected detected, version $required or higher required"
+	exit 1
+    fi
+fi
+
 if [ "$want_dwz" = true ]; then
     # Validate dwz's result by checking if the executable was modified.
     cp "$output_file" "${output_file}.copy"
@@ -267,11 +290,11 @@ if [ "$want_gnu_debuglink" = true ]; then
     debug_file="$tmpdir"/$(basename "$output_file").debug
 
     # Create stripped and debug versions of output_file.
-    strip --strip-debug "${output_file}" \
+    strip "${STRIP_ARGS_STRIP_DEBUG[@]}" "${output_file}" \
 	  -o "${stripped_file}"
     rc=$?
     [ $rc != 0 ] && exit $rc
-    strip --only-keep-debug "${output_file}" \
+    strip "${STRIP_ARGS_KEEP_DEBUG[@]}" "${output_file}" \
 	  -o "${debug_file}"
     rc=$?
     [ $rc != 0 ] && exit $rc
@@ -285,7 +308,7 @@ if [ "$want_gnu_debuglink" = true ]; then
 
 	# Overwrite output_file with stripped version containing
 	# .gnu_debuglink to debug_file.
-	objcopy --add-gnu-debuglink="$link" "${stripped_file}" \
+	$OBJCOPY --add-gnu-debuglink="$link" "${stripped_file}" \
 		"${output_file}"
 	rc=$?
 	[ $rc != 0 ] && exit $rc

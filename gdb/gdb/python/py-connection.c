@@ -1,6 +1,6 @@
 /* Python interface to inferiors.
 
-   Copyright (C) 2009-2022 Free Software Foundation, Inc.
+   Copyright (C) 2009-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -204,12 +204,12 @@ connpy_repr (PyObject *obj)
   process_stratum_target *target = self->target;
 
   if (target == nullptr)
-    return PyString_FromFormat ("<%s (invalid)>", Py_TYPE (obj)->tp_name);
+    return PyUnicode_FromFormat ("<%s (invalid)>", Py_TYPE (obj)->tp_name);
 
-  return PyString_FromFormat ("<%s num=%d, what=\"%s\">",
-			      Py_TYPE (obj)->tp_name,
-			      target->connection_number,
-			      make_target_connection_string (target).c_str ());
+  return PyUnicode_FromFormat ("<%s num=%d, what=\"%s\">",
+			       Py_TYPE (obj)->tp_name,
+			       target->connection_number,
+			       make_target_connection_string (target).c_str ());
 }
 
 /* Implementation of gdb.TargetConnection.is_valid() -> Boolean.  Returns
@@ -285,7 +285,7 @@ connpy_get_connection_details (PyObject *self, void *closure)
 
 /* Python specific initialization for this file.  */
 
-int
+static int CPYCHECKER_NEGATIVE_RESULT_SETS_EXCEPTION
 gdbpy_initialize_connection (void)
 {
   if (PyType_Ready (&connection_object_type) < 0)
@@ -446,6 +446,8 @@ _initialize_py_connection ()
   gdb::observers::connection_removed.attach (connpy_connection_removed,
 					     "py-connection");
 }
+
+GDBPY_INITIALIZE_FILE (gdbpy_initialize_connection);
 
 /* Methods for the gdb.TargetConnection object type.  */
 

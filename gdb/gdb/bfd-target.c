@@ -1,6 +1,6 @@
 /* Very simple "bfd" target, for GDB, the GNU debugger.
 
-   Copyright (C) 2003-2022 Free Software Foundation, Inc.
+   Copyright (C) 2003-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -94,10 +94,10 @@ target_bfd::target_bfd (const gdb_bfd_ref_ptr &abfd)
 {
 }
 
-target_ops *
+target_ops_up
 target_bfd_reopen (const gdb_bfd_ref_ptr &abfd)
 {
-  return new target_bfd (abfd);
+  return target_ops_up (new target_bfd (abfd));
 }
 
 void

@@ -1,4 +1,4 @@
-/* Copyright (C) 1986-2022 Free Software Foundation, Inc.
+/* Copyright (C) 1986-2023 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -24,7 +24,7 @@
 #include "gdbsupport/intrusive_list.h"
 
 struct target_waitstatus;
-struct frame_info;
+class frame_info_ptr;
 struct address_space;
 struct return_value_info;
 struct process_stratum_target;
@@ -40,13 +40,41 @@ extern bool debug_infrun;
 
 /* Print "infrun" start/end debug statements.  */
 
-#define INFRUN_SCOPED_DEBUG_START_END(msg) \
-  scoped_debug_start_end (debug_infrun, "infrun", msg)
+#define INFRUN_SCOPED_DEBUG_START_END(fmt, ...) \
+  scoped_debug_start_end (debug_infrun, "infrun", fmt, ##__VA_ARGS__)
 
 /* Print "infrun" enter/exit debug statements.  */
 
 #define INFRUN_SCOPED_DEBUG_ENTER_EXIT \
   scoped_debug_enter_exit (debug_infrun, "infrun")
+
+/* A infrun debug helper routine to print out all the threads in the set
+   THREADS (which should be a range type that returns thread_info*
+   objects).
+
+   The TITLE is a string that is printed before the list of threads.
+
+   Output is only produced when 'set debug infrun on'.  */
+
+template<typename ThreadRange>
+static inline void
+infrun_debug_show_threads (const char *title, ThreadRange threads)
+{
+  if (debug_infrun)
+    {
+      INFRUN_SCOPED_DEBUG_ENTER_EXIT;
+
+      infrun_debug_printf ("%s:", title);
+      for (thread_info *thread : threads)
+	infrun_debug_printf ("  thread %s, executing = %d, resumed = %d, "
+			     "state = %s",
+			     thread->ptid.to_string ().c_str (),
+			     thread->executing (),
+			     thread->resumed (),
+			     thread_state_string (thread->state));
+    }
+}
+
 
 /* Nonzero if we want to give control to the user when we're notified
    of shared library events by the dynamic linker.  */
@@ -89,6 +117,13 @@ enum exec_direction_kind
 /* The current execution direction.  */
 extern enum exec_direction_kind execution_direction;
 
+/* Call this to point 'previous_thread' at the thread returned by
+   inferior_thread, or at nullptr, if there's no selected thread.  */
+extern void update_previous_thread ();
+
+/* Get a weak reference to 'previous_thread'.  */
+extern thread_info *get_previous_thread ();
+
 extern void start_remote (int from_tty);
 
 /* Clear out all variables saying what to do when inferior is
@@ -121,7 +156,7 @@ extern process_stratum_target *user_visible_resume_target (ptid_t resume_ptid);
    appropriate messages, remove breakpoints, give terminal our modes,
    and run the stop hook.  Returns true if the stop hook proceeded the
    target, false otherwise.  */
-extern int normal_stop (void);
+extern bool normal_stop ();
 
 /* Return the cached copy of the last target/ptid/waitstatus returned
    by target_wait().  The data is actually cached by handle_inferior_event(),
@@ -138,8 +173,14 @@ extern void set_last_target_status (process_stratum_target *target, ptid_t ptid,
    target_wait().  */
 extern void nullify_last_target_wait_ptid ();
 
-/* Stop all threads.  Only returns after everything is halted.  */
-extern void stop_all_threads (void);
+/* Stop all threads.  Only returns after everything is halted.
+
+   REASON is a string indicating the reason why we stop all threads, used in
+   debug messages.
+
+   If INF is non-nullptr, stop all threads of that inferior.  Otherwise, stop
+   all threads of all inferiors.  */
+extern void stop_all_threads (const char *reason, inferior *inf = nullptr);
 
 extern void prepare_for_detach (void);
 
@@ -166,8 +207,19 @@ extern int stepping_past_nonsteppable_watchpoint (void);
 
 /* Record in TP the frame and location we're currently stepping through.  */
 extern void set_step_info (thread_info *tp,
-			   struct frame_info *frame,
+			   frame_info_ptr frame,
 			   struct symtab_and_line sal);
+
+/* Notify interpreters and observers that the current inferior has stopped with
+   signal SIG.  */
+extern void notify_signal_received (gdb_signal sig);
+
+/* Notify interpreters and observers that the current inferior has stopped
+   normally.  */
+extern void notify_normal_stop (bpstat *bs, int print_frame);
+
+/* Notify interpreters and observers that the user focus has changed.  */
+extern void notify_user_selected_context_changed (user_selected_what selection);
 
 /* Several print_*_reason helper functions to print why the inferior
    has stopped to the passed in UIOUT.  */
@@ -175,10 +227,6 @@ extern void set_step_info (thread_info *tp,
 /* Signal received, print why the inferior has stopped.  */
 extern void print_signal_received_reason (struct ui_out *uiout,
 					  enum gdb_signal siggnal);
-
-/* Print why the inferior has stopped.  We are done with a
-   step/next/si/ni command, print why the inferior has stopped.  */
-extern void print_end_stepping_range_reason (struct ui_out *uiout);
 
 /* The inferior was terminated by a signal, print why it stopped.  */
 extern void print_signal_exited_reason (struct ui_out *uiout,
@@ -228,9 +276,6 @@ extern void update_signals_program_target (void);
    inferior.  Currently, those variables are $_exitcode and
    $_exitsignal.  */
 extern void clear_exit_convenience_vars (void);
-
-/* Dump LEN bytes at BUF in hex to a string and return it.  */
-extern std::string displaced_step_dump_bytes (const gdb_byte *buf, size_t len);
 
 extern void update_observer_mode (void);
 
